@@ -5,8 +5,9 @@ architecture and `docs/RESEARCH.md` for what each platform API does and does not
 
 ## Load-bearing rules
 
-- **Auto-commit, never push.** After a coherent, validated change, stage only that change's
-  files and commit. Pushing is the owner's.
+- **Auto-commit and auto-push.** After a coherent, validated change, stage only that change's
+  files, commit, then push with `git -C <repo> push origin <branch>` after the pre-push file
+  check in `~/projects/AGENTS.md`. Never force-push.
 - **Adversarial review before calling a code change done.** Run `/xreview` on the diff of the
   unit of work, once per unit, not once per commit. A high or critical finding is a hard gate.
   Docs-only and config-only changes skip it.
