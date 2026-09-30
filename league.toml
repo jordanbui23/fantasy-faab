@@ -1,0 +1,44 @@
+# League configuration. No private data here: this file is committed.
+# The league id, team id and roster live in gitignored files or the environment.
+
+teams = 10
+season = 2026
+
+# Yahoo's default FAAB budget. Confirm against the league settings page once the
+# Yahoo API approval arrives, then correct this if it differs.
+faab_budget = 100
+
+timezone = "America/New_York"
+
+# Your own team name, exactly as it appears in Yahoo's standings, tells your FAAB balance
+# apart from your rivals' in a pasted budgets file. It identifies you, so it does not belong
+# in this committed file: put it in `league.local.toml`, which is gitignored and overrides
+# any key here. For example:
+#
+#   own_team = "Your Team Name"
+
+# Starting slots, read off the Yahoo roster page: 10 starters and 5 bench.
+# FLEX is Yahoo's W/R/T.
+[slots]
+QB = 1
+RB = 2
+WR = 3
+TE = 1
+FLEX = 1
+K = 1
+DEF = 1
+
+# Scoring, used to project points. These defaults reproduce nflverse's
+# fantasy_points_ppr exactly, verified against a real week 1 line. Change `reception` to
+# 0.5 for half PPR or 0 for standard: it is the one term that cannot be derived from the
+# published totals, and it moves every receiver and back.
+[scoring]
+pass_yards = 0.04
+pass_td = 4.0
+interception = -2.0
+rush_yards = 0.1
+rush_td = 6.0
+reception = 1.0
+rec_yards = 0.1
+rec_td = 6.0
+fumble_lost = -2.0

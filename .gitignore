@@ -1,0 +1,25 @@
+# Secrets. Never commit.
+.env
+.env.*
+secrets/
+*.token
+oauth2.json
+private.json
+
+# Local overrides that identify their owner, such as a team name.
+league.local.toml
+
+# Local data snapshots. Regenerable, and league data is private.
+data/
+out/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# OpenCode tooling dirs
+.opencode/
+.omo/

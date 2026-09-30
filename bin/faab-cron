@@ -1,0 +1,201 @@
+#!/bin/sh
+# Scheduled report runner, called hourly by cron.
+#
+# Cron fires every hour in UTC and the tool decides whether the league-local clock
+# matches its gate. This box runs UTC while the schedule is Eastern, so a fixed UTC hour
+# would drift by one when daylight saving changes.
+#
+# The ntfy topic is a cron variable that --install writes into the crontab. It reaches
+# this script through the environment and is never passed as a command line argument,
+# because a command line is readable by any local process.
+#
+# Every byte written into the crontab is decided by faab.crontab, which is unit tested.
+# This script only reads the crontab, hands the text over, and writes the result back.
+# It works through files rather than command substitution, because substitution strips
+# trailing newlines and cron rejects a final job line that has none.
+
+set -eu
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PY="$REPO/.venv/bin/python"
+LOG_DIR="$REPO/data/logs"
+SELF="$REPO/bin/faab-cron"
+
+GATE_LINEUP="sun:9"
+GATE_WAIVERS="tue:20"
+
+WORK=""
+
+cleanup() {
+    if [ -n "$WORK" ]; then
+        rm -rf "$WORK"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+workdir() {
+    if [ -z "$WORK" ]; then
+        WORK="$(mktemp -d)"
+    fi
+    printf '%s' "$WORK"
+}
+
+usage() {
+    cat <<EOF
+usage: $(basename "$0") <action>
+
+  --install          add the hourly entries, copying \$FAAB_NTFY_TOPIC into the crontab
+  --remove           take them out
+  --show             print the block --install would add
+  --run <schedule>   run now, ignoring the clock gate
+  --scheduled <s>    run only if the league-local clock matches
+
+  <schedule> is lineup or waivers.
+EOF
+}
+
+faab_python() {
+    PYTHONPATH="$REPO/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" "$@"
+}
+
+crontab_tool() {
+    faab_python -m faab.crontab "$@" --runner "$SELF" --log-dir "$LOG_DIR"
+}
+
+gate_for() {
+    case "$1" in
+        lineup) printf '%s' "$GATE_LINEUP" ;;
+        waivers) printf '%s' "$GATE_WAIVERS" ;;
+        *) echo "unknown schedule: ${1:-<none>}, expected lineup or waivers" >&2
+           exit 1 ;;
+    esac
+}
+
+require_topic() {
+    if [ -z "${FAAB_NTFY_TOPIC:-}" ]; then
+        echo "FAAB_NTFY_TOPIC is not set." >&2
+        echo "Export it, then install, which copies it into the crontab:" >&2
+        echo "  export FAAB_NTFY_TOPIC=your-topic" >&2
+        echo "  $SELF --install" >&2
+        exit 1
+    fi
+    export FAAB_NTFY_TOPIC
+}
+
+# Writes the current crontab to a file, or aborts. An empty file must mean "no crontab",
+# never "the read failed", because that text is piped back in and a wrongly empty read
+# would erase every job the owner has. The locale is pinned so the absence message is
+# the one this check knows.
+read_crontab_to() {
+    target="$1"
+    errors="$(workdir)/read-errors"
+    if LC_ALL=C crontab -l > "$target" 2>"$errors"; then
+        return 0
+    fi
+    if LC_ALL=C grep -qi 'no crontab for' "$errors"; then
+        : > "$target"
+        return 0
+    fi
+    echo "could not read the crontab, so nothing was changed:" >&2
+    cat "$errors" >&2
+    exit 1
+}
+
+# crontab takes no lock, so a concurrent edit between the read and the write is lost
+# silently. Comparing the whole file against what was written detects that, which
+# checking for our own marker could not: our marker is present either way.
+compare_or_abort() {
+    expected="$1"
+    actual="$2"
+    sed '/^[[:space:]]*$/d' "$expected" > "$expected.norm"
+    sed '/^[[:space:]]*$/d' "$actual" > "$actual.norm"
+    if cmp -s "$expected.norm" "$actual.norm"; then
+        return 0
+    fi
+    echo "the crontab does not match what was just written." >&2
+    echo "Another editor probably changed it at the same time." >&2
+    echo "Re-run this command, then check with: crontab -l" >&2
+    diff "$expected.norm" "$actual.norm" >&2 || true
+    exit 1
+}
+
+report_legacy() {
+    source_file="$1"
+    legacy="$(workdir)/legacy"
+    crontab_tool legacy < "$source_file" > "$legacy"
+    if [ -s "$legacy" ]; then
+        echo "These unmarked lines look like an earlier version's and were left alone:" >&2
+        cat "$legacy" >&2
+        echo "Remove them by hand with \`crontab -e\` if they are not yours." >&2
+    fi
+}
+
+run_report() {
+    require_topic
+    mkdir -p "$LOG_DIR"
+    # The package lives in src/ and is not installed, so cron's bare interpreter cannot
+    # import it without this.
+    cd "$REPO"
+    PYTHONPATH="$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH
+    exec "$PY" -m faab "$@" --send
+}
+
+case "${1:-}" in
+    --show)
+        require_topic
+        crontab_tool show
+        ;;
+    --install)
+        if [ ! -x "$PY" ]; then
+            echo "no interpreter at $PY, create the venv first, see README" >&2
+            exit 1
+        fi
+        require_topic
+        mkdir -p "$LOG_DIR"
+        before="$(workdir)/before"
+        proposed="$(workdir)/proposed"
+        actual="$(workdir)/actual"
+        read_crontab_to "$before"
+        # Built and validated before the crontab is touched. A bad topic or a damaged
+        # block exits non-zero here, and set -e stops with the crontab unchanged.
+        crontab_tool install < "$before" > "$proposed"
+        crontab - < "$proposed"
+        read_crontab_to "$actual"
+        compare_or_abort "$proposed" "$actual"
+        echo "installed:"
+        crontab_tool show
+        report_legacy "$before"
+        ;;
+    --remove)
+        before="$(workdir)/before"
+        proposed="$(workdir)/proposed"
+        actual="$(workdir)/actual"
+        read_crontab_to "$before"
+        crontab_tool remove < "$before" > "$proposed"
+        crontab - < "$proposed"
+        read_crontab_to "$actual"
+        compare_or_abort "$proposed" "$actual"
+        echo "removed."
+        ;;
+    --scheduled)
+        schedule="${2:-}"
+        gate="$(gate_for "$schedule")"
+        case "$schedule" in
+            lineup) run_report lineup --snapshot --if-local "$gate" ;;
+            waivers) run_report waivers --if-local "$gate" ;;
+        esac
+        ;;
+    --run)
+        schedule="${2:-}"
+        gate_for "$schedule" > /dev/null
+        case "$schedule" in
+            lineup) run_report lineup --snapshot ;;
+            waivers) run_report waivers ;;
+        esac
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
