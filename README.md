@@ -36,8 +36,9 @@ for the three above.
 
 ## Status
 
-Both scheduled reports work end to end against live data. The rival-bidding model, which
-is the actual edge, is still blocked on Yahoo.
+Both scheduled reports work end to end against live data. Yahoo API access went live on
+2026-10-04, so the rival-bidding model, which is the actual edge, is now unblocked and not
+yet built.
 
 | Component | State |
 | --- | --- |
@@ -61,8 +62,8 @@ is the actual edge, is still blocked on Yahoo.
 | `bin/faab-cron` | working, hourly cron with an in-tool clock gate |
 | Scheduling | working, topic held as a cron variable |
 | `src/faab/collectors/yahoo_auth.py` | working, OAuth2 with a self-refreshing token |
-| Yahoo collector | blocked until Yahoo enables the approved app |
-| Rival budget and roster-hole model | blocked on Yahoo data |
+| Yahoo collector | not built; every field it needs is confirmed readable |
+| Rival budget and roster-hole model | not built; waits on the collector |
 | Keeper equity per candidate | not applicable, a waiver add is never keeper-eligible |
 
 ## Architecture

@@ -440,6 +440,39 @@ Distinguishing a 403 from a 401 matters here and is worth keeping. Yahoo returns
 bad or expired token and 403 for an application that is not permitted, so the status alone
 separates "re-authorize" from "the app is wrong" without any further calls.
 
+## 7g. Access is live, and what the API actually returns
+
+**`confirmed` 2026-10-04 by observation.** Yahoo's "your access is live" email arrived ten
+days after the confirmation form. The token issued during the 403 period then worked
+unchanged after one silent refresh, so no re-authorization was needed. The API host is
+`fantasysports.yahooapis.com`; `fantasy.yahooapis.com` does not resolve.
+
+Every field section 1 assumed is present for this league, read with `format=json`:
+
+| Request | What came back |
+| --- | --- |
+| `league/{key}/settings` | `uses_faab`, waiver type and timing, weeks, trade deadline |
+| `league/{key}/teams` | `faab_balance` and `waiver_priority` on every team, not only your own |
+| `league/{key}/transactions` | `faab_bid` on completed claims, including $0 claims |
+| `league/{key}/teams/roster;week=N` | every rostered player with `selected_position` |
+| `league/{key}/players;status=A` | the free-agent pool, paged |
+| `team/{key}/matchups;weeks=N` | `team_projected_points` for each side |
+
+So the three league-local signals in the README are all readable, and the pasted budgets
+and available-players files can be replaced.
+
+**Per-player projections were not found.** `players/stats;type=week;week=N` returned
+`player_points` for each player and no projected field, on both a roster and a free-agent
+request. That is one method, so the result is **`unverified`** as an absence. Yahoo's web
+page shows a per-player projection (section 7b), and the matchup carries a team-level one,
+so the data exists somewhere. Until it is found the model's own projection stays the input,
+and the conservative minimum against Yahoo can only use pasted figures.
+
+The JSON shape is unusual and worth knowing before writing a parser. Collections are
+objects keyed `"0"`, `"1"` and so on, plus a `"count"` key, rather than arrays. A resource's
+fields are split across a list of single-key objects. A parser should walk for named keys
+rather than index fixed positions.
+
 ## 8. Open questions
 
 - ~~**Keeper cost for an undrafted waiver add.**~~ **Closed 2026-09-23, `confirmed`
@@ -448,12 +481,13 @@ separates "re-authorize" from "the app is wrong" without any further calls.
   is therefore a rental for the remainder of the current season, worth exactly its
   rest-of-season points, and the bid model must not carry a keeper term. This closes the
   question rather than answering it: the feature it would have fed does not exist.
-- **Does the real league expose opponent `faab_balance`?** Verify on first authenticated
-  call. The docs samples say yes; this league's settings could differ.
-- **Are FAAB bid amounts present on completed transactions for this league?** Verify on the
-  same call.
-- **Does Yahoo return per-player weekly projected points in league scoring?** If so, no
-  projection vendor is needed. Check before paying FantasyPros.
+- ~~**Does the real league expose opponent `faab_balance`?**~~ **Closed 2026-10-04,
+  `confirmed`.** Every team carries it. See section 7g.
+- ~~**Are FAAB bid amounts present on completed transactions for this league?**~~ **Closed
+  2026-10-04, `confirmed`.** `faab_bid` is on completed claims. Losing bids remain absent.
+- **Does Yahoo return per-player weekly projected points in league scoring?** Still open.
+  The weekly stats request returns points scored and no projection (section 7g, one method,
+  `unverified`). Check other requests before paying FantasyPros.
 
 ## 9. Environment constraints
 
