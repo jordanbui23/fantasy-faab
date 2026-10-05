@@ -2,7 +2,8 @@
 
 Weekly FAAB waiver research for a keeper fantasy football league on Yahoo. A cron wakes
 collectors, a deterministic layer computes the parts that must not be guessed, and the tool
-writes a ranked claim sheet with a dollar bid and a drop candidate per target.
+writes a ranked claim sheet with a dollar bid and a drop candidate per target. On game days
+it checks your starters before every kickoff and pushes an alert when one will not play.
 
 **The bot recommends. You submit the bid.** Yahoo removed write access from its Fantasy
 Sports API, so no claim is ever placed automatically. See `docs/RESEARCH.md`.
@@ -36,9 +37,9 @@ for the three above.
 
 ## Status
 
-Both scheduled reports work end to end against live data. Yahoo API access went live on
-2026-10-04, so the rival-bidding model, which is the actual edge, is now unblocked and not
-yet built.
+Both scheduled reports and the game-day check run against live Yahoo data. Rosters,
+budgets and the claimable pool come from the API, and the pasted files are only a fallback.
+The rival-bidding model, which is the actual edge, is unblocked and not yet built.
 
 | Component | State |
 | --- | --- |
@@ -62,8 +63,10 @@ yet built.
 | `bin/faab-cron` | working, hourly cron with an in-tool clock gate |
 | Scheduling | working, topic held as a cron variable |
 | `src/faab/collectors/yahoo_auth.py` | working, OAuth2 with a self-refreshing token |
-| Yahoo collector | not built; every field it needs is confirmed readable |
-| Rival budget and roster-hole model | not built; waits on the collector |
+| `src/faab/collectors/yahoo.py` | working, leagues, teams, rosters, statuses, winning bids |
+| `src/faab/yahoo_state.py` | working, Yahoo's league view in the models' shapes |
+| `src/faab/gameday.py` | working, pre-kickoff check for starters who will not play |
+| Rival budget and roster-hole model | not built; every input is now readable |
 | Keeper equity per candidate | not applicable, a waiver add is never keeper-eligible |
 
 ## Architecture
@@ -73,7 +76,7 @@ cron, hourly, on this box
   |
   +-- bin/faab-cron           installs the entries; the clock gate is in the tool
   |
-  +-- faab/cli.py             lineup | waivers | roster | auth, and the --if-local gate
+  +-- faab/cli.py             lineup | waivers | gameday | roster | auth, --if-local gate
         |
         +-- faab/cache.py     atomic writes, TTL disk cache, truncation floors
         |
@@ -81,11 +84,12 @@ cron, hourly, on this box
         |     nflverse.py     stats, snaps, injuries, depth charts, AND player ids
         |     sleeper.py      add/drop velocity, team defenses, injury status
         |     yahoo_auth.py   OAuth2 code exchange and refresh, read-only
-        |     yahoo.py        league state, FAAB balances, bid ledger      [blocked]
+        |     yahoo.py        rosters, statuses, FAAB balances, winning bids
         |
         +-- faab/names.py     typed name -> gsis_id, refuses to guess
-        +-- faab/roster.py    the hand-typed roster file, until Yahoo opens
-        +-- faab/paste.py     pasted Yahoo pages: free agents, projections, budgets
+        +-- faab/yahoo_state.py   Yahoo players resolved to gsis ids, worse status wins
+        +-- faab/roster.py    the hand-typed roster file, the fallback without a token
+        +-- faab/paste.py     pasted Yahoo pages: projections, and the fallback pool
         +-- faab/league.py    slot rules and budget, league.toml plus a local override
         |
         +-- faab/model/       deterministic, no language model
@@ -97,6 +101,7 @@ cron, hourly, on this box
         |     need.py         each claim as an add/drop swap, priced by the solver
         |     rival budgets, roster holes                               [blocked]
         |
+        +-- faab/gameday.py   kickoff windows, starters who will not play, replacements
         +-- faab/report.py    plain text, trimmed to fit one notification
         +-- faab/notify.py    ntfy push
         +-- faab/crontab.py   every byte written into the crontab, unit tested
@@ -182,9 +187,14 @@ The suite is offline by default. To exercise the live Sleeper and nflverse calls
 FAAB_LIVE_TESTS=1 .venv/bin/python -m pytest tests/ -q
 ```
 
-Then three things before the first report. Edit `league.toml` so the slots match the
-league, and put your team name in `league.local.toml`, which is gitignored because it
-identifies you. Write the roster, one player per line, into `data/roster.txt`; running any command
+Authorize Yahoo once with `python -m faab auth`, which prints a URL, then
+`python -m faab auth --code '<redirected URL>'`. The app's credentials go in `.env` as
+`YAHOO_CLIENT_ID`, `YAHOO_CLIENT_SECRET` and `YAHOO_REDIRECT_URI`. If your account has more
+than one league, put `yahoo_league_id = <id>` in `league.local.toml`, which is gitignored
+because it identifies you. Then `python -m faab roster` should list your Yahoo roster.
+
+Without a token, three things stand in. Edit `league.toml` so the slots match the league,
+and put your team name in `league.local.toml`. Write the roster, one player per line, into `data/roster.txt`; running any command
 creates a template there. Export the ntfy topic, which is the credential, because anyone
 holding it can read and publish to the topic:
 
@@ -211,6 +221,32 @@ Add `--send` to push one to the phone. Install the schedule once both look right
 bin/faab-cron --show
 bin/faab-cron --install
 ```
+
+## The game-day check
+
+`faab gameday` exists for one outcome: a starter who will not take the field is reported
+while he can still be moved. NFL teams must name their inactive players 90 minutes before
+kickoff, and Yahoo locks each player at his own game's start. So for every kickoff time the
+check runs twice inside that window: 75 minutes before, once the inactive lists should be
+out, and 15 minutes before, for anything that changed late.
+
+It reads your roster from Yahoo, takes every starter whose game is in that kickoff, and
+pushes an urgent alert for anyone Yahoo marks out, inactive or on a reserve list, for a
+starter whose team has a bye, and for an empty starting slot. Questionable, doubtful and
+any unfamiliar status get a normal alert, and so does a team abbreviation the schedule does
+not know. Each alert names the bench players who can fill the slot, healthy and not yet
+locked, best projected first. An all-clear check sends nothing.
+
+A failure is never quiet. If Yahoo cannot be read, or returns a roster for the wrong week,
+the check pushes "the lineup check failed, check by hand" once and keeps retrying until
+kickoff. If the schedule cannot be fetched and the cached copy is more than three days old,
+it pushes the same warning once a day. If the push itself fails, the check stays due and the
+next run tries again, so a failure can repeat an alert but never lose one. Cron runs it every five minutes, and a run
+with nothing due reads only the cached schedule. `bin/faab-cron --run gameday` checks the
+next kickoff immediately and records nothing, which is the way to test it.
+
+What it cannot catch is a starter who is active, plays, and scores nothing. Before kickoff
+he looks like every other active starter. `docs/RESEARCH.md` section 7h has the details.
 
 ## Scheduling, and why the clock gate is in the tool
 

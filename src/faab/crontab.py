@@ -80,6 +80,7 @@ def build_block(topic: str, runner: str, log_dir: str) -> list[str]:
         f"{TOPIC_VARIABLE}={topic}",
         f"17 * * * * {runner} --scheduled lineup >> {log_dir}/cron.log 2>&1",
         f"17 * * * * {runner} --scheduled waivers >> {log_dir}/cron.log 2>&1",
+        f"*/5 * * * * {runner} --scheduled gameday >> {log_dir}/gameday.log 2>&1",
         f"{TOPIC_VARIABLE}=",
         END_MARKER,
     ]

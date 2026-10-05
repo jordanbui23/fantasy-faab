@@ -1,8 +1,9 @@
 #!/bin/sh
-# Scheduled report runner, called hourly by cron.
+# Scheduled report runner, called by cron.
 #
-# Cron fires every hour in UTC and the tool decides whether the league-local clock
-# matches its gate. This box runs UTC while the schedule is Eastern, so a fixed UTC hour
+# The two reports fire every hour in UTC and the tool decides whether the league-local
+# clock matches its gate. The game-day check fires every five minutes and the tool decides
+# whether a kickoff is close enough to check. This box runs UTC while the schedule is Eastern, so a fixed UTC hour
 # would drift by one when daylight saving changes.
 #
 # The ntfy topic is a cron variable that --install writes into the crontab. It reaches
@@ -50,7 +51,7 @@ usage: $(basename "$0") <action>
   --run <schedule>   run now, ignoring the clock gate
   --scheduled <s>    run only if the league-local clock matches
 
-  <schedule> is lineup or waivers.
+  <schedule> is lineup, waivers or gameday.
 EOF
 }
 
@@ -66,7 +67,8 @@ gate_for() {
     case "$1" in
         lineup) printf '%s' "$GATE_LINEUP" ;;
         waivers) printf '%s' "$GATE_WAIVERS" ;;
-        *) echo "unknown schedule: ${1:-<none>}, expected lineup or waivers" >&2
+        gameday) printf '%s' "kickoff" ;;
+        *) echo "unknown schedule: ${1:-<none>}, expected lineup, waivers or gameday" >&2
            exit 1 ;;
     esac
 }
@@ -184,6 +186,7 @@ case "${1:-}" in
         case "$schedule" in
             lineup) run_report lineup --snapshot --if-local "$gate" ;;
             waivers) run_report waivers --if-local "$gate" ;;
+            gameday) run_report gameday ;;
         esac
         ;;
     --run)
@@ -192,6 +195,7 @@ case "${1:-}" in
         case "$schedule" in
             lineup) run_report lineup --snapshot ;;
             waivers) run_report waivers ;;
+            gameday) run_report gameday --force ;;
         esac
         ;;
     *)

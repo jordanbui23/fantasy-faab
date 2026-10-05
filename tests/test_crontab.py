@@ -127,6 +127,15 @@ def test_both_schedules_are_installed():
     block = "\n".join(crontab.build_block("t", RUNNER, LOG_DIR))
     assert "--scheduled lineup" in block
     assert "--scheduled waivers" in block
+    assert "--scheduled gameday" in block
+
+
+def test_the_gameday_entry_runs_every_five_minutes():
+    entries = [
+        line for line in crontab.build_block("t", RUNNER, LOG_DIR) if "--scheduled gameday" in line
+    ]
+    assert len(entries) == 1
+    assert entries[0].split()[:5] == ["*/5", "*", "*", "*", "*"]
 
 
 # --- refuse rather than guess --------------------------------------------------
@@ -305,10 +314,10 @@ def test_the_block_has_exactly_two_entries():
 
 def test_the_block_is_exactly_six_lines():
     """Markers, the variable, two entries, and the clearing line."""
-    assert len(crontab.build_block("t", RUNNER, LOG_DIR)) == 6
+    assert len(crontab.build_block("t", RUNNER, LOG_DIR)) == 7
 
 
 def test_install_output_parses_back_to_the_same_lines():
     """The written text must re-read as the lines it was built from."""
     result = crontab.install(OTHER_JOBS + "\n", "my-topic", RUNNER, LOG_DIR)
-    assert result.splitlines()[-6:] == crontab.build_block("my-topic", RUNNER, LOG_DIR)
+    assert result.splitlines()[-7:] == crontab.build_block("my-topic", RUNNER, LOG_DIR)

@@ -10,12 +10,16 @@ faab_budget = 100
 
 timezone = "America/New_York"
 
-# Your own team name, exactly as it appears in Yahoo's standings, tells your FAAB balance
-# apart from your rivals' in a pasted budgets file. It identifies you, so it does not belong
-# in this committed file: put it in `league.local.toml`, which is gitignored and overrides
-# any key here. For example:
+# Values that identify you belong in `league.local.toml`, which is gitignored and overrides
+# any key here. Two of them:
 #
-#   own_team = "Your Team Name"
+#   yahoo_league_id = 12345          the number at the end of your league's Yahoo URL,
+#                                    needed only when your account has several leagues
+#   own_team = "Your Team Name"      used only with pasted budgets; the API knows your team
+#
+# Positions a waiver claim may be for. Narrow it if you never want a claim at one, for
+# example a quarterback when you already roster two starters.
+claim_positions = ["QB", "RB", "WR", "TE", "K"]
 
 # Starting slots, read off the Yahoo roster page: 10 starters and 5 bench.
 # FLEX is Yahoo's W/R/T.

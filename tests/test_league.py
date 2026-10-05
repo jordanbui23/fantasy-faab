@@ -228,3 +228,36 @@ def test_unknown_scoring_keys_in_both_files_are_each_named_with_their_file(tmp_p
     assert "alpha" in committed and "beta" not in committed
     assert "league.local.toml" not in committed
     assert "league.local.toml" in local and "beta" in local and "alpha" not in local
+
+
+# --- Yahoo league id and claim positions ------------------------------------------------
+
+
+def test_the_yahoo_league_id_comes_from_the_local_override(tmp_path):
+    (tmp_path / "league.toml").write_text("teams = 10\n", encoding="utf-8")
+    (tmp_path / "league.local.toml").write_text("yahoo_league_id = 12345\n", encoding="utf-8")
+    assert load_league(tmp_path / "league.toml").yahoo_league_id == 12345
+
+
+@pytest.mark.parametrize("value", ['"12345"', "-1", "true"])
+def test_a_bad_yahoo_league_id_is_refused(tmp_path, value):
+    (tmp_path / "league.toml").write_text(f"yahoo_league_id = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="yahoo_league_id"):
+        load_league(tmp_path / "league.toml")
+
+
+def test_claim_positions_default_to_every_scoring_position(tmp_path):
+    assert load_league(tmp_path / "absent.toml").claim_positions == ("QB", "RB", "WR", "TE", "K")
+
+
+def test_claim_positions_can_be_narrowed_locally(tmp_path):
+    (tmp_path / "league.toml").write_text('claim_positions = ["QB", "RB"]\n', encoding="utf-8")
+    (tmp_path / "league.local.toml").write_text('claim_positions = ["rb", "WR"]\n', encoding="utf-8")
+    assert load_league(tmp_path / "league.toml").claim_positions == ("RB", "WR")
+
+
+@pytest.mark.parametrize("value", ['[]', '"RB"', '["RB", "XX"]', "[1]"])
+def test_bad_claim_positions_are_refused_naming_the_file(tmp_path, value):
+    (tmp_path / "league.local.toml").write_text(f"claim_positions = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="league.local.toml.*claim_positions"):
+        load_league(tmp_path / "league.toml")

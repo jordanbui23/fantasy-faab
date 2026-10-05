@@ -73,6 +73,27 @@ def _read_scoring(raw: object, source: Callable[[str | None], str] = lambda key:
     return Scoring(**values)
 
 
+# Positions a waiver claim may be for. A team holding two starting quarterbacks has no use
+# for a third, so an owner can narrow this in league.local.toml.
+DEFAULT_CLAIM_POSITIONS = ("QB", "RB", "WR", "TE", "K")
+KNOWN_POSITIONS = frozenset({"QB", "RB", "WR", "TE", "K", "DEF"})
+
+
+def _read_claim_positions(raw: object, origin: Path) -> tuple[str, ...]:
+    if raw is None:
+        return DEFAULT_CLAIM_POSITIONS
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(f"{origin}: claim_positions must be a non-empty list")
+    positions: list[str] = []
+    for value in raw:
+        position = str(value).strip().upper() if isinstance(value, str) else ""
+        if position not in KNOWN_POSITIONS:
+            raise ConfigError(f"{origin}: claim_positions has an unknown position {value!r}")
+        if position not in positions:
+            positions.append(position)
+    return tuple(positions)
+
+
 @dataclass(frozen=True)
 class League:
     teams: int = 12
@@ -82,6 +103,8 @@ class League:
     timezone: str = "America/New_York"
     own_team: str = ""
     scoring: Scoring = field(default_factory=Scoring)
+    yahoo_league_id: int = 0
+    claim_positions: tuple[str, ...] = DEFAULT_CLAIM_POSITIONS
 
     @property
     def starters(self) -> int:
@@ -176,10 +199,12 @@ def load_league(path: Path) -> League:
     teams = raw.get("teams", 12)
     budget = raw.get("faab_budget", 100)
     season = raw.get("season", 2026)
+    yahoo_league_id = raw.get("yahoo_league_id", 0)
     for label, value, low in (
         ("teams", teams, 2),
         ("faab_budget", budget, 0),
         ("season", season, 1999),
+        ("yahoo_league_id", yahoo_league_id, 0),
     ):
         if not isinstance(value, int) or isinstance(value, bool) or value < low:
             origin = _origin(path, local, label)
@@ -192,6 +217,10 @@ def load_league(path: Path) -> League:
         season=season,
         timezone=str(raw.get("timezone", "America/New_York")),
         own_team=str(raw.get("own_team", "")),
+        yahoo_league_id=yahoo_league_id,
+        claim_positions=_read_claim_positions(
+            raw.get("claim_positions"), _origin(path, local, "claim_positions")
+        ),
         scoring=_read_scoring(
             raw.get("scoring"), lambda key: f"{_origin(path, local, 'scoring', key)}: "
         ),

@@ -458,8 +458,10 @@ Every field section 1 assumed is present for this league, read with `format=json
 | `league/{key}/players;status=A` | the free-agent pool, paged |
 | `team/{key}/matchups;weeks=N` | `team_projected_points` for each side |
 
-So the three league-local signals in the README are all readable, and the pasted budgets
-and available-players files can be replaced.
+So the three league-local signals in the README are all readable. The reports now take
+rosters, budgets and the claimable pool from the API, and the pasted files are a fallback.
+The claimable pool is everyone not on a roster in the league, since a player on waivers
+and a free agent are both claimed through FAAB.
 
 **Per-player projections were not found.** `players/stats;type=week;week=N` returned
 `player_points` for each player and no projected field, on both a roster and a free-agent
@@ -468,10 +470,43 @@ page shows a per-player projection (section 7b), and the matchup carries a team-
 so the data exists somewhere. Until it is found the model's own projection stays the input,
 and the conservative minimum against Yahoo can only use pasted figures.
 
+`editorial_team_abbr` is mixed case and spells the Rams `LAR`, where nflverse uses `LA`.
+A team defense is named by its nickname alone. `is_editable` sits after
+`selected_position` in a player's resource, not among his own fields, and only the logged-in
+team's players carry it.
+
 The JSON shape is unusual and worth knowing before writing a parser. Collections are
 objects keyed `"0"`, `"1"` and so on, plus a `"count"` key, rather than arrays. A resource's
 fields are split across a list of single-key objects. A parser should walk for named keys
 rather than index fixed positions.
+
+## 7h. Game-day statuses, and what a pre-kickoff check can and cannot see
+
+**`supported`, two NFL sources.** Teams must submit their inactive lists 90 minutes before
+kickoff. NFL Football Operations describes the list being exchanged at the officials'
+90-minute pregame meeting ([operations.nfl.com](https://operations.nfl.com/game-operations-logistics/preparation-safety/game-and-stadium-prep)),
+and NFL.com states "Inactives are required 90 minutes before kickoff"
+([nfl.com, 2020-12-16](https://www.nfl.com/news/new-rule-to-allow-teams-to-replace-late-covid-19-inactives)).
+A player listed Out on Friday's game status report must be inactive.
+
+**`confirmed` 2026-10-04 by observation.** Yahoo's roster `status` carried these codes on
+one Sunday afternoon: `O`, `IR`, `IR-R`, `PUP-R`, `CEL`, `NA`, `D` and `Q`. `NA` reads
+"Inactive: Coach's Decision or Not on Roster", which is how a game-day inactive appears.
+`is_editable` was 0 for every one of the owner's players whose game had kicked off and 1
+for every one whose game had not, checked against the schedule a minute before a 4:25pm
+kickoff. That makes it the lock signal: a locked player cannot be moved, so the check
+skips him.
+
+**`confirmed` 2026-10-04 by observation, one case.** A starter listed questionable on
+Sunday morning had his designation cleared by Yahoo before kickoff, after a player note
+timestamped about 85 minutes before. He was active, played about a third of the offensive
+snaps, and scored nothing. No pre-kickoff signal separates him from any other active
+starter, so this check would have reported nothing, correctly. Catching that case needs
+in-game data, and nothing in this project reads it.
+
+The kickoff time comes from nflverse's `games.csv`, whose `gametime` is Eastern wall-clock
+time (**`supported`**, nflverse data dictionary). It agreed with the lock times above: the
+4:25pm game read `16:25` and its players were still editable at 4:24pm Eastern.
 
 ## 8. Open questions
 

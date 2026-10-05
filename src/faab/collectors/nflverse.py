@@ -23,7 +23,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from faab.cache import fetch_text_cached
+from faab.cache import fetch_text_cached, is_fresh
 
 RELEASE_BASE = "https://github.com/nflverse/nflverse-data/releases/download"
 GAMES_URL = "https://github.com/nflverse/nfldata/raw/master/data/games.csv"
@@ -123,6 +123,17 @@ def load_players(
     return _load_release(
         "players", "players.csv", cache_dir, max_age_seconds, _MIN_BYTES["players"]
     )
+
+
+def load_cached_games(cache_dir: Path, max_age_seconds: int) -> list[dict[str, str]]:
+    """The last schedule fetched, when it is younger than `max_age_seconds`."""
+    cache_path = cache_dir / "nflverse" / "games.csv"
+    if not is_fresh(cache_path, max_age_seconds):
+        raise ValueError(f"{cache_path}: missing, or older than {max_age_seconds // 3600} hours")
+    rows = _parse_csv(cache_path.read_text(encoding="utf-8"))
+    if not rows:
+        raise ValueError(f"{cache_path}: parsed to zero rows")
+    return rows
 
 
 def load_games(

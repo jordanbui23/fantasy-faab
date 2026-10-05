@@ -121,7 +121,9 @@ def build_candidates(
             blocked = status
 
         warning = ""
-        if not blocked and status in WARN_STATUSES:
+        if not blocked and status:
+            # Any designation not known to be harmless is shown. An unfamiliar label from a
+            # source is a reason to look, never a reason to stay quiet.
             warning = status
         elif not blocked and entry is None and rankable:
             # An unrankable position has no stats by design, so its absence is not news.
