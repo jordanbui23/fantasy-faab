@@ -126,7 +126,7 @@ def find_legacy_lines(current: str, runner: str) -> list[str]:
     else's cron entry is worse than leaving a duplicate the owner can see.
     """
     found = []
-    for line in current.splitlines():
+    for line in strip_block(current):
         stripped = line.strip()
         if stripped == LEGACY_MARKER:
             found.append(stripped)

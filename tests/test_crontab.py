@@ -270,6 +270,18 @@ def test_legacy_lines_are_not_deleted_by_an_edit():
     assert legacy_entry in result
 
 
+def test_a_reinstall_does_not_report_its_own_block_as_legacy():
+    """The marked block's own entries are ours, not an earlier unmarked version's."""
+    installed = _install(OTHER_JOBS + "\n")
+    assert crontab.find_legacy_lines(installed, RUNNER) == []
+
+
+def test_an_unmarked_entry_beside_the_block_is_still_reported():
+    legacy_entry = f"17 * * * * {RUNNER} --scheduled lineup"
+    installed = _install(f"{legacy_entry}\n")
+    assert crontab.find_legacy_lines(installed, RUNNER) == [legacy_entry]
+
+
 def test_no_legacy_lines_in_a_clean_crontab():
     assert crontab.find_legacy_lines(OTHER_JOBS + "\n", RUNNER) == []
 
