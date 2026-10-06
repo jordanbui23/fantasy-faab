@@ -62,7 +62,7 @@ def more_severe(first: str, second: str) -> str:
 
 
 def marker(player: Player) -> str:
-    return player.gsis_id or f"{player.position}:{player.key}"
+    return player.marker
 
 
 def resolve_player(entry: YahooPlayer, index: NameIndex) -> tuple[Player | None, str]:
@@ -97,6 +97,18 @@ class LeagueState:
     rostered_ids: set[str] = field(default_factory=set)
     rostered_names: set[str] = field(default_factory=set)
     entry_for: dict[str, YahooPlayer] = field(default_factory=dict)
+    keepers: set[str] = field(default_factory=set)
+    reserve: set[str] = field(default_factory=set)
+
+    @property
+    def unmatched_active(self) -> int:
+        """Own players outside IR slots whose names did not resolve. They still hold a spot."""
+        return sum(1 for entry, _ in self.unresolved if entry.selected_position != "IR")
+
+    @property
+    def active_roster(self) -> list[Player]:
+        """The roster less players in IR slots, which take no bench space."""
+        return [player for player in self.roster if marker(player) not in self.reserve]
 
     @property
     def own_budget(self) -> int:
@@ -164,6 +176,10 @@ def load_state(client: Getter, league: League, index: NameIndex, week: int) -> L
             if team_key == own.team_key:
                 state.roster.append(player)
                 state.entry_for[marker(player)] = entry
+                if entry.is_keeper:
+                    state.keepers.add(marker(player))
+                if entry.selected_position == "IR":
+                    state.reserve.add(marker(player))
     return state
 
 

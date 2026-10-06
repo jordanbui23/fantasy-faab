@@ -38,7 +38,7 @@ from faab.model.usage import build_usage
 from faab.model import need
 from faab.model import waiver as waiver_model
 from faab.collectors.sleeper import fetch_trending_players
-from faab.names import NameIndex, Player, build_index
+from faab.names import NameIndex, Player, build_index, normalize_name
 from faab.roster import ROSTER_TEMPLATE, load_roster
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -350,8 +350,16 @@ def _price_swaps(
     through: int,
     league: League,
     market: dict[str, float],
+    protected: frozenset[str] = frozenset(),
+    unmatched: int = 0,
 ) -> list:
-    """Every claim in the pool, priced as a swap and ranked by net gain."""
+    """Every claim in the pool, priced as a swap and ranked by net gain.
+
+    `roster` must exclude players in IR slots, since they take no bench space. A pasted
+    roster cannot tell them apart, so it can only overstate how full the roster is.
+    `protected` players are never offered as the drop. `unmatched` counts roster spots held
+    by players who failed to resolve, so they still make the roster full.
+    """
     context = need.Context(
         roster=roster,
         usage=usage,
@@ -360,13 +368,34 @@ def _price_swaps(
         week=week,
         league=league,
         through_week=through,
-        roster_size=max(len(roster), league.starters),
+        roster_size=league.starters + league.bench - unmatched,
         market=market,
+        protected=protected,
     )
     base = need.projected_total(need.baseline_lineup(context))
     swaps = [need.best_swap(context, player, base) for player in pool]
     swaps.sort(key=lambda s: (-s.gain, -s.optimistic_gain))
     return need.best_per_position(swaps)
+
+
+def _configured_keepers(roster: list[Player], league: League) -> frozenset[str]:
+    """Roster players named in `keepers`, which protects them when Yahoo's flag is absent."""
+    wanted = {normalize_name(name) for name in league.keepers}
+    return frozenset(p.marker for p in roster if any(key in wanted for key in p.keys))
+
+
+def _keeper_warnings(roster: list[Player], league: League, from_yahoo: bool) -> list[str]:
+    """Why keeper protection cannot be confirmed, empty when it can.
+
+    Any line here makes the sheet name no drop at all, and the line leads the sheet in the
+    banner, which is never trimmed.
+    """
+    held = {key for player in roster for key in player.keys}
+    missing = [name for name in league.keepers if normalize_name(name) not in held]
+    warnings = [f"Keeper {name} is not on the roster, so no drop is named." for name in missing]
+    if not from_yahoo and not league.keepers:
+        warnings.append("No keepers set in league.local.toml, so no drop is named.")
+    return warnings
 
 
 def _maybe_send(args: argparse.Namespace, body: str, week: int) -> int:
@@ -496,6 +525,14 @@ def cmd_waivers(args: argparse.Namespace) -> int:
         if row.get("name") and isinstance(row.get("count"), int)
     }
 
+    swap_roster, unmatched = roster, 0
+    protected = _configured_keepers(roster, league)
+    if state is not None:
+        swap_roster, unmatched = state.active_roster, state.unmatched_active
+        protected |= frozenset(state.keepers)
+    keeper_gaps = _keeper_warnings(roster, league, state is not None)
+    if keeper_gaps:
+        protected = frozenset(player.marker for player in swap_roster)
     if state is not None:
         available, available_problems = None, []
         rival_budgets, own_budget = state.rival_budgets, state.own_budget
@@ -510,7 +547,9 @@ def cmd_waivers(args: argparse.Namespace) -> int:
             if p.position in league.claim_positions
         ]
 
-    banner = _fallback_banner(fallback_note)
+    banner = _fallback_banner(
+        "\n".join([*([fallback_note] if fallback_note else []), *keeper_gaps])
+    )
     budget_bytes = report.NTFY_MAX_BYTES - len(banner.encode("utf-8"))
     if state is not None and not pool:
         # The usage-based sheet below excludes only this team's roster. With Yahoo's view
@@ -521,7 +560,8 @@ def cmd_waivers(args: argparse.Namespace) -> int:
 
     if pool:
         swaps = _price_swaps(
-            pool, roster, usage, projections, byes, week, through, league, market
+            pool, swap_roster, usage, projections, byes, week, through, league, market,
+            protected, unmatched,
         )
         gains = [s.gain for s in swaps]
         bids = {

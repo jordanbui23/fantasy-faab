@@ -73,6 +73,7 @@ class Context:
     through_week: int
     roster_size: int = 15
     market: dict[str, float] | None = None
+    protected: frozenset[str] = frozenset()
 
     @property
     def is_full(self) -> bool:
@@ -267,6 +268,9 @@ def best_swap(context: Context, candidate: Player, base: float | None = None) ->
     best: Swap | None = None
     for held in context.roster:
         if held.gsis_id and held.gsis_id == candidate.gsis_id:
+            continue
+        if held.marker in context.protected:
+            # A keeper carries next season's value, which no weekly gain can outbid.
             continue
         remaining = [p for p in context.roster if p is not held]
         gain, legal = gain_for(pricing, [*remaining, candidate])

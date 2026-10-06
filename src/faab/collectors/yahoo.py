@@ -69,6 +69,7 @@ class YahooPlayer:
     selected_position: str
     is_editable: bool | None
     bye_week: int | None
+    is_keeper: bool = False
 
     @property
     def is_starting(self) -> bool:
@@ -292,6 +293,7 @@ def _player(parts: Any) -> YahooPlayer:
     )
     selected = fields(extras.get("selected_position"))
     bye = meta.get("bye_weeks")
+    keeper = meta.get("is_keeper")
     editable = extras.get("is_editable", meta.get("is_editable"))
     return YahooPlayer(
         player_key=str(meta.get("player_key") or ""),
@@ -305,6 +307,8 @@ def _player(parts: Any) -> YahooPlayer:
         selected_position=str(selected.get("position") or ""),
         is_editable=None if editable is None else _int_or_none(editable) == 1,
         bye_week=_int_or_none(bye.get("week")) if isinstance(bye, dict) else None,
+        is_keeper=isinstance(keeper, dict)
+        and (keeper.get("kept") is True or keeper.get("status") is True),
     )
 
 

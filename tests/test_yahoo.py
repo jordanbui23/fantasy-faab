@@ -51,6 +51,7 @@ def player_parts(
     eligible=None,
     bye=9,
     note=None,
+    keeper=None,
 ):
     meta: list[Any] = [
         {"player_key": key},
@@ -66,6 +67,8 @@ def player_parts(
         meta.append({"status_full": {"O": "Out", "Q": "Questionable", "NA": "Inactive"}.get(status, status)})
     if note:
         meta.append({"injury_note": note})
+    if keeper is not None:
+        meta.append({"is_keeper": keeper})
     extras: list[Any] = [{"selected_position": [{"coverage_type": "week", "week": "5"}, {"position": slot}]}]
     if editable is not None:
         extras.append({"is_editable": 1 if editable else 0})
@@ -380,3 +383,18 @@ def test_an_unreadable_body_raises(token_file, response):
     session = FakeSession([response])
     with pytest.raises(YahooError):
         yahoo.Client(CREDS, token_file, session=session, sleep=lambda s: None).get("/x")
+
+
+@pytest.mark.parametrize(
+    "keeper,expected",
+    [
+        ({"status": True, "cost": False, "kept": True}, True),
+        ({"status": False, "cost": False, "kept": True}, True),
+        ({"status": False, "cost": False, "kept": False}, False),
+        (None, False),
+        ("junk", False),
+    ],
+)
+def test_keeper_status_is_read(keeper, expected):
+    content = {"team": roster_team(team_parts("T", "Mine"), [player_parts("p.1", "Alan Starter", keeper=keeper)])}
+    assert yahoo.team_roster(StubClient({"/team/T/roster": content}), "T", 5)[0].is_keeper is expected

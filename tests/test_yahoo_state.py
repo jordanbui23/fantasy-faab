@@ -40,8 +40,9 @@ INDEX = NameIndex(
 )
 
 
-def entry(name, slot="WR", position="WR", team="PHI", status="", key=None):
+def entry(name, slot="WR", position="WR", team="PHI", status="", key=None, keeper=False):
     return YahooPlayer(
+        is_keeper=keeper,
         player_key=key or f"p.{name}",
         name=name,
         position=position,
@@ -116,8 +117,8 @@ class StubClient:
 @pytest.fixture
 def state(monkeypatch):
     mine = [
-        entry("Alan Starter", slot="WR"),
-        entry("Ben Bench", slot="BN"),
+        entry("Alan Starter", slot="WR", keeper=True),
+        entry("Ben Bench", slot="IR"),
         entry("Rams", slot="DEF", position="DEF", team="LA"),
         entry("Ghost Player", slot="BN"),
     ]
@@ -173,6 +174,14 @@ def test_rostered_players_league_wide_are_not_claimable(state):
 def test_an_unresolved_rival_player_still_blocks_his_name(state):
     """A rival's player who failed to match must not be offered as a claim."""
     assert state.is_rostered(player("Mystery Man", gsis="00-99"))
+
+
+def test_keepers_and_ir_slots_are_tracked(state):
+    starter = next(p for p in state.roster if p.name == "Alan Starter")
+    bench = next(p for p in state.roster if p.name == "Ben Bench")
+    assert state.keepers == {starter.marker}
+    assert state.reserve == {bench.marker}
+    assert bench not in state.active_roster and starter in state.active_roster
 
 
 def test_lineup_changes_name_who_to_start_and_sit(state):
@@ -285,3 +294,114 @@ def test_a_yahoo_lineup_report_leads_with_the_moves_to_make(waivers_env, monkeyp
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
     assert out.startswith("Your Yahoo lineup already matches.")
+
+
+def test_an_open_bench_spot_makes_a_claim_free(state):
+    """IR-slotted players take no bench space, so they must not make the roster look full.
+
+    Two starters and one bench spot hold three players. The active roster has two, so a
+    claim costs nobody, though the whole roster including IR would look full.
+    """
+    league = League(slots={"WR": 1, "DEF": 1}, bench=1)
+    pool = [player("Same Name", team="NYJ", gsis="00-6")]
+    projections = {
+        "00-6": _projection("Same Name", "WR", "NYJ", "00-6", 12.0),
+        "00-1": _projection("Alan Starter", "WR", "PHI", "00-1", 10.0),
+    }
+    assert len(state.active_roster) == league.starters
+    swaps = cli._price_swaps(pool, state.active_roster, {}, projections, set(), 5, 4, league, {})
+    assert swaps[0].drop is None and swaps[0].gain > 0
+    # The fixture also carries an unmatched bench player, who would fill the spot.
+    assert state.unmatched_active == 1
+
+
+def test_an_unmatched_active_player_still_holds_a_roster_spot(state):
+    """The fixture's own roster has one unresolved bench player, Ghost Player."""
+    assert state.unmatched_active == 1
+    league = League(slots={"WR": 1, "DEF": 1}, bench=1)
+    pool = [player("Same Name", team="NYJ", gsis="00-6")]
+    projections = {
+        "00-6": _projection("Same Name", "WR", "NYJ", "00-6", 12.0),
+        "00-1": _projection("Alan Starter", "WR", "PHI", "00-1", 10.0),
+    }
+    swaps = cli._price_swaps(
+        pool, state.active_roster, {}, projections, set(), 5, 4, league, {},
+        unmatched=state.unmatched_active,
+    )
+    assert swaps[0].drop is not None
+
+
+def test_a_configured_keeper_is_protected_without_yahoo():
+    roster = [player("Alan Starter", gsis="00-1"), player("Same Name", team="NYJ", gsis="00-6")]
+    league = League(keepers=("alan starter",))
+    assert cli._configured_keepers(roster, league) == frozenset({"00-1"})
+    assert cli._configured_keepers(roster, League()) == frozenset()
+
+
+def test_the_paste_fallback_protects_configured_keepers(waivers_env, monkeypatch, tmp_path):
+    """A Yahoo outage must not reopen the keeper as a drop."""
+    monkeypatch.setattr(cli, "_league_state", lambda args, league, index, week: (None, "down"))
+    monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
+    seen = []
+
+    def record(pool, roster, usage, projections, byes, week, through, league, market, protected, unmatched):
+        seen.append(protected)
+        return []
+
+    monkeypatch.setattr(cli, "_price_swaps", record)
+    (tmp_path / "roster.txt").write_text("Alan Starter\nSame Name WR NYJ\n", encoding="utf-8")
+    (tmp_path / "league.toml").write_text('keepers = ["Alan Starter"]\n', encoding="utf-8")
+    argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
+            "--roster", str(tmp_path / "roster.txt"), "waivers"]
+    assert cli.main(argv) == 0
+    assert seen == [frozenset({"00-1"})]
+
+
+def test_a_keeper_name_that_matches_nobody_is_named_in_the_banner(waivers_env, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(cli, "_league_state", lambda args, league, index, week: (None, ""))
+    monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
+    monkeypatch.setattr(cli, "_price_swaps", lambda *a, **k: [])
+    (tmp_path / "roster.txt").write_text("Alan Starter\n", encoding="utf-8")
+    (tmp_path / "league.toml").write_text('keepers = ["Alan Startr"]\n', encoding="utf-8")
+    argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
+            "--roster", str(tmp_path / "roster.txt"), "waivers"]
+    assert cli.main(argv) == 0
+    assert capsys.readouterr().out.startswith("Keeper Alan Startr is not on the roster, so no drop")
+
+
+def test_a_pasted_roster_with_no_keepers_set_says_so(waivers_env, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(cli, "_league_state", lambda args, league, index, week: (None, ""))
+    monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
+    monkeypatch.setattr(cli, "_price_swaps", lambda *a, **k: [])
+    (tmp_path / "roster.txt").write_text("Alan Starter\n", encoding="utf-8")
+    argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
+            "--roster", str(tmp_path / "roster.txt"), "waivers"]
+    assert cli.main(argv) == 0
+    assert capsys.readouterr().out.startswith("No keepers set in league.local.toml, so no drop")
+
+
+def test_matched_keepers_add_no_warning():
+    roster = [player("Alan Starter", gsis="00-1")]
+    assert cli._keeper_warnings(roster, League(keepers=("Alan Starter",)), from_yahoo=False) == []
+    assert cli._keeper_warnings(roster, League(), from_yahoo=True) == []
+
+
+@pytest.mark.parametrize("keepers", ["", 'keepers = ["Alan Startr"]\n'])
+def test_unconfirmed_keeper_protection_names_no_drop(waivers_env, monkeypatch, tmp_path, keepers):
+    """A keeper that cannot be identified must not be offered, so nobody is."""
+    monkeypatch.setattr(cli, "_league_state", lambda args, league, index, week: (None, "down"))
+    monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
+    seen = []
+
+    def record(pool, roster, usage, projections, byes, week, through, league, market, protected, unmatched):
+        seen.append((protected, {p.marker for p in roster}))
+        return []
+
+    monkeypatch.setattr(cli, "_price_swaps", record)
+    (tmp_path / "roster.txt").write_text("Alan Starter\nSame Name WR NYJ\n", encoding="utf-8")
+    (tmp_path / "league.toml").write_text(keepers, encoding="utf-8")
+    argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
+            "--roster", str(tmp_path / "roster.txt"), "waivers"]
+    assert cli.main(argv) == 0
+    protected, roster = seen[0]
+    assert roster and protected == frozenset(roster)

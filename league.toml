@@ -16,10 +16,15 @@ timezone = "America/New_York"
 #   yahoo_league_id = 12345          the number at the end of your league's Yahoo URL,
 #                                    needed only when your account has several leagues
 #   own_team = "Your Team Name"      used only with pasted budgets; the API knows your team
+#   keepers = ["Player Name"]        never suggested as a drop; Yahoo's keeper flag also
+#                                    protects them, and this covers the pasted fallback
 #
 # Positions a waiver claim may be for. Narrow it if you never want a claim at one, for
 # example a quarterback when you already roster two starters.
 claim_positions = ["QB", "RB", "WR", "TE", "K"]
+
+# Bench spots. IR slots are separate and are not counted here.
+bench = 5
 
 # Starting slots, read off the Yahoo roster page: 10 starters and 5 bench.
 # FLEX is Yahoo's W/R/T.

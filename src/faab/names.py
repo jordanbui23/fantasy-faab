@@ -101,6 +101,11 @@ class Player:
     def is_active(self) -> bool:
         return self.status == ACTIVE_STATUS
 
+    @property
+    def marker(self) -> str:
+        """A stable identity, for a team defense too, which has no gsis_id."""
+        return self.gsis_id or f"{self.position}:{self.key}"
+
 
 def players_from_nflverse(rows: list[dict[str, str]]) -> list[Player]:
     """Build the player list from nflverse's directory, which owns `gsis_id`.

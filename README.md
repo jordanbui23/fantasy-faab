@@ -194,7 +194,8 @@ than one league, put `yahoo_league_id = <id>` in `league.local.toml`, which is g
 because it identifies you. Then `python -m faab roster` should list your Yahoo roster.
 
 Without a token, three things stand in. Edit `league.toml` so the slots match the league,
-and put your team name in `league.local.toml`. Write the roster, one player per line, into `data/roster.txt`; running any command
+and put your team name and keepers in `league.local.toml`, as `own_team = "..."` and
+`keepers = ["..."]`. Write the roster, one player per line, into `data/roster.txt`; running any command
 creates a template there. Export the ntfy topic, which is the credential, because anyone
 holding it can read and publish to the topic:
 

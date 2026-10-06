@@ -94,6 +94,14 @@ def _read_claim_positions(raw: object, origin: Path) -> tuple[str, ...]:
     return tuple(positions)
 
 
+def _read_keepers(raw: object, origin: Path) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(v, str) and v.strip() for v in raw):
+        raise ConfigError(f"{origin}: keepers must be a list of player names")
+    return tuple(v.strip() for v in raw)
+
+
 @dataclass(frozen=True)
 class League:
     teams: int = 12
@@ -104,6 +112,8 @@ class League:
     own_team: str = ""
     scoring: Scoring = field(default_factory=Scoring)
     yahoo_league_id: int = 0
+    bench: int = 5
+    keepers: tuple[str, ...] = ()
     claim_positions: tuple[str, ...] = DEFAULT_CLAIM_POSITIONS
 
     @property
@@ -200,7 +210,9 @@ def load_league(path: Path) -> League:
     budget = raw.get("faab_budget", 100)
     season = raw.get("season", 2026)
     yahoo_league_id = raw.get("yahoo_league_id", 0)
+    bench = raw.get("bench", 5)
     for label, value, low in (
+        ("bench", bench, 0),
         ("teams", teams, 2),
         ("faab_budget", budget, 0),
         ("season", season, 1999),
@@ -218,6 +230,8 @@ def load_league(path: Path) -> League:
         timezone=str(raw.get("timezone", "America/New_York")),
         own_team=str(raw.get("own_team", "")),
         yahoo_league_id=yahoo_league_id,
+        bench=bench,
+        keepers=_read_keepers(raw.get("keepers"), _origin(path, local, "keepers")),
         claim_positions=_read_claim_positions(
             raw.get("claim_positions"), _origin(path, local, "claim_positions")
         ),

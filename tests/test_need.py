@@ -7,6 +7,7 @@ position empties a slot, which a points comparison cannot see.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -282,3 +283,26 @@ def test_a_blocked_drop_is_named_rather_than_hidden():
     swap = need.best_swap(context, candidate)
     assert swap.drop is not None
     assert "bye" in swap.drop_blocked
+
+
+# --- keepers are never the drop -----------------------------------------------------
+
+
+def test_a_protected_player_is_never_the_drop():
+    league = League(slots={"WR": 1})
+    context = _context({("Starter", "WR"): 12.0, ("Keeper", "WR"): 3.0}, league=league)
+    candidate = _add(context, _player("Better", "WR", team="BUF"), 15.0)
+    keeper = next(p for p in context.roster if p.name == "Keeper")
+
+    assert need.best_swap(context, candidate).drop == keeper
+    swap = need.best_swap(replace(context, protected=frozenset({keeper.marker})), candidate)
+    assert swap.drop is not None and swap.drop.name == "Starter"
+
+
+def test_when_every_drop_is_protected_the_claim_is_worth_nothing():
+    league = League(slots={"WR": 1})
+    context = _context({("Keeper", "WR"): 3.0}, league=league)
+    candidate = _add(context, _player("Better", "WR", team="BUF"), 15.0)
+    keeper = context.roster[0]
+    swap = need.best_swap(replace(context, protected=frozenset({keeper.marker})), candidate)
+    assert swap.drop is None and swap.gain == 0.0 and not swap.is_upgrade

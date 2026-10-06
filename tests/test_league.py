@@ -261,3 +261,28 @@ def test_bad_claim_positions_are_refused_naming_the_file(tmp_path, value):
     (tmp_path / "league.local.toml").write_text(f"claim_positions = {value}\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="league.local.toml.*claim_positions"):
         load_league(tmp_path / "league.toml")
+
+
+def test_bench_defaults_to_five_and_can_be_set(tmp_path):
+    assert load_league(tmp_path / "absent.toml").bench == 5
+    (tmp_path / "league.toml").write_text("bench = 6\n", encoding="utf-8")
+    assert load_league(tmp_path / "league.toml").bench == 6
+
+
+@pytest.mark.parametrize("value", ["-1", '"5"', "true"])
+def test_a_bad_bench_count_is_refused(tmp_path, value):
+    (tmp_path / "league.toml").write_text(f"bench = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="bench"):
+        load_league(tmp_path / "league.toml")
+
+
+def test_keepers_are_read_from_the_local_override(tmp_path):
+    (tmp_path / "league.local.toml").write_text('keepers = ["A Player", " B Player "]\n', encoding="utf-8")
+    assert load_league(tmp_path / "league.toml").keepers == ("A Player", "B Player")
+
+
+@pytest.mark.parametrize("value", ['"A Player"', "[1]", '[""]'])
+def test_bad_keepers_are_refused(tmp_path, value):
+    (tmp_path / "league.local.toml").write_text(f"keepers = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="league.local.toml.*keepers"):
+        load_league(tmp_path / "league.toml")
