@@ -23,7 +23,7 @@ LOG_DIR="$REPO/data/logs"
 SELF="$REPO/bin/faab-cron"
 
 GATE_LINEUP="sun:9"
-GATE_WAIVERS="tue:20"
+GATE_WAIVERS="tue:17"
 
 WORK=""
 

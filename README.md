@@ -251,7 +251,7 @@ he looks like every other active starter. `docs/RESEARCH.md` section 7h has the 
 
 ## Scheduling, and why the clock gate is in the tool
 
-The report goes out Sunday at 9am Eastern and the claim sheet Tuesday at 8pm Eastern.
+The report goes out Sunday at 9am Eastern and the claim sheet Tuesday at 5pm Eastern.
 Cron fires hourly in UTC, and `--if-local sun:9` decides whether to do any work. That
 split exists because a server usually runs UTC while the schedule is Eastern, so a fixed UTC hour
 would drift by one when daylight saving changes. An hourly wake plus a gate is correct
