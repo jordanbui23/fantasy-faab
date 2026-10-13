@@ -49,28 +49,14 @@ BID_FRACTIONS = ((0.80, 0.18), (0.60, 0.10), (0.40, 0.05), (0.0, 0.01))
 # and this model cannot recognise one of those with enough confidence to spend that.
 MAX_BID_SHARE = 0.12
 
-# The exclusive weekly gain that earns the maximum bid. Exclusive means the gain this claim
-# has over the next best ALTERNATIVE claim, not its gain over the current lineup.
+# The exclusive gain per week of the horizon that earns the maximum bid. Exclusive means the
+# gain this claim has over its fallback claim, not its gain over the current lineup.
 GAIN_FOR_MAX_BID = 4.0
 
 # What a claim is worth when it improves nothing this week. It buys an option on somebody
 # getting hurt, which is worth a dollar and not more.
 STASH_BID = 1
 
-
-def exclusive_gain(gain: float, alternatives: list[float]) -> float:
-    """The part of a claim's gain that losing it would actually cost.
-
-    A bid buys one player, so the question is never "what is he worth" but "what is he worth
-    MORE than whoever I would take instead". When nine kickers all improve the lineup by
-    three points, winning any particular one is worth almost nothing, and bidding as though
-    it were worth three points is how a season's budget disappears in week 4.
-
-    `alternatives` is every other claim's gain. Pass an empty list when a claim is genuinely
-    the only one available, which is the only case where full gain is the right basis.
-    """
-    best_other = max(alternatives, default=0.0)
-    return max(0.0, gain - best_other)
 
 # A bid at or above this share of the budget is a serious one, used to judge which rivals
 # could realistically outbid a claim. Set at the top BID_FRACTIONS tier, so "able to
@@ -126,33 +112,59 @@ def rival_contention(rival_budgets: list[int], budget: int) -> float | None:
     return able / len(rival_budgets)
 
 
-def bid_for_swap(
-    gain: float,
-    alternatives: list[float],
-    budget: int,
-    rival_budgets: list[int] | None = None,
-    trending_adds: int = 0,
-) -> int:
-    """A whole-dollar bid sized from what a claim exclusively adds.
+# Which other claim at the same position stands in when a bid is lost, counted from the best.
+# One means the second best: the best alternative may well be claimed by a rival too.
+REPLACEMENT_RANK = 1
 
-    Three things hold it down, and each corrects a way the earlier version overbid. The
-    basis is exclusive gain rather than gain, so a deep position cannot command a premium.
-    The share is capped at `MAX_BID_SHARE` of the budget however large the gain, because the
-    budget must survive the rest of the season. And a claim that improves nothing now is a
-    flat `STASH_BID`, whatever its role trend says.
+# Claims a position needs in this league's history before its prices cap a bid.
+MARKET_MIN_CLAIMS = 3
+
+
+def replacement_value(others: list[float]) -> float:
+    """What losing a claim falls back to: a lesser claim at the same position."""
+    if not others:
+        return 0.0
+    ranked = sorted(others, reverse=True)
+    return ranked[min(REPLACEMENT_RANK, len(ranked) - 1)]
+
+
+def market_cap(winning_bids: list[int]) -> int | None:
+    """A dollar over the most this league has ever paid at a position.
+
+    Kickers and defenses clear for nothing in most leagues, so a model that bids more is
+    paying for a contest that does not happen. Too short a history caps nothing.
+    """
+    if len(winning_bids) < MARKET_MIN_CLAIMS:
+        return None
+    return max(winning_bids) + 1
+
+
+def bid_for_claim(
+    value: float,
+    replacement: float,
+    budget: int,
+    effective_weeks: float,
+    rival_budgets: list[int] | None = None,
+    cap: int | None = None,
+) -> int:
+    """A whole-dollar bid sized from what a claim adds over its replacement, all season.
+
+    `value` and `replacement` are horizon values from `need.best_swap`. A claim that adds
+    `GAIN_FOR_MAX_BID` points in every week of the horizon earns the largest bid, so a
+    player who fills one bye week earns about a horizon's fraction of it.
     """
     if budget <= 0:
         return 0
-
-    exclusive = exclusive_gain(gain, alternatives)
-    if gain < 0.5 or exclusive <= 0.0:
-        return min(budget, STASH_BID)
-
-    share = min(MAX_BID_SHARE, (exclusive / GAIN_FOR_MAX_BID) * MAX_BID_SHARE)
-    from_budgets = rival_contention(rival_budgets or [], budget)
-    contested = from_budgets if from_budgets is not None else 1.0 - scarcity(trending_adds)
-    raised = min(MAX_BID_SHARE, share * (1.0 + CONTENTION_UPLIFT * contested))
-    return max(1, min(budget, round(budget * raised)))
+    exclusive = max(0.0, value - replacement)
+    full = GAIN_FOR_MAX_BID * max(1.0, effective_weeks)
+    if value < 0.5 or exclusive <= 0.0:
+        bid = min(budget, STASH_BID)
+    else:
+        share = min(MAX_BID_SHARE, (exclusive / full) * MAX_BID_SHARE)
+        contested = rival_contention(rival_budgets or [], budget)
+        raised = min(MAX_BID_SHARE, share * (1.0 + CONTENTION_UPLIFT * (contested or 0.0)))
+        bid = max(1, min(budget, round(budget * raised)))
+    return bid if cap is None else min(bid, cap)
 
 
 def suggested_bid(

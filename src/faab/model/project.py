@@ -71,6 +71,11 @@ EFFICIENCY_PRIOR = 25.0
 RARE_EVENT_PRIOR = 400.0
 
 KICKER_POSITION = "K"
+
+# Games of league-average kicking blended into every kicker's own average. Kicker scoring
+# barely repeats from week to week, so a few big games say little about the next one, and
+# an unshrunk average once valued a kicker at nearly twice the league norm.
+KICKER_PRIOR_GAMES = 8.0
 UNPROJECTABLE_POSITIONS = frozenset({"DEF", "DST"})
 
 # Yahoo's default distance scoring, also used by model.usage for the same reason: the
@@ -175,6 +180,7 @@ class PlayerSeason:
     position: str = ""
     team: str = ""
     weeks: dict[int, dict[str, float]] = field(default_factory=dict)
+    recent: bool = True
 
     def totals(self, column: str) -> float:
         return sum(week.get(column, 0.0) for week in self.weeks.values())
@@ -192,8 +198,11 @@ class PlayerSeason:
         if not self.weeks:
             return 0.0
         recent = [self.weeks[w] for w in sorted(self.weeks, reverse=True)]
-        recent = recent[: len(VOLUME_WEIGHTS)]
-        weights = VOLUME_WEIGHTS[: len(recent)]
+        if self.recent:
+            recent = recent[: len(VOLUME_WEIGHTS)]
+            weights = VOLUME_WEIGHTS[: len(recent)]
+        else:
+            weights = (1.0,) * len(recent)
         weighted = sum(w * week.get(column, 0.0) for w, week in zip(weights, recent))
         return weighted / sum(weights)
 
@@ -266,11 +275,14 @@ def build_seasons(
 
 
 def project_player(
-    season: PlayerSeason, rates: LeagueRates, scoring: Scoring
+    season: PlayerSeason,
+    rates: LeagueRates,
+    scoring: Scoring,
+    kicker_average: float | None = None,
 ) -> Projection:
     """Project one player's points for a single coming game."""
     if season.position == KICKER_POSITION:
-        return _project_kicker(season)
+        return _project_kicker(season, kicker_average)
 
     attempts = season.per_game("attempts")
     carries = season.per_game("carries")
@@ -348,16 +360,38 @@ def project_player(
     )
 
 
-def _project_kicker(season: PlayerSeason) -> Projection:
-    """Kickers get a recency-weighted average of their own scoring.
+def _kicker_average(season: PlayerSeason) -> float:
+    return sum(weight * season.per_game(column) for column, weight in KICKER_BUCKETS.items())
+
+
+def _kicker_game_points(week: dict[str, float]) -> float:
+    return sum(weight * week.get(column, 0.0) for column, weight in KICKER_BUCKETS.items())
+
+
+def league_kicker_average(seasons: dict[str, PlayerSeason]) -> float | None:
+    """Points per kicker game across the league, or None when no kicker has played."""
+    games = [
+        _kicker_game_points(week)
+        for season in seasons.values()
+        if season.position == KICKER_POSITION
+        for week in season.weeks.values()
+    ]
+    return sum(games) / len(games) if games else None
+
+
+def _project_kicker(season: PlayerSeason, league_average: float | None = None) -> Projection:
+    """A kicker's recency-weighted average, shrunk toward the league's.
 
     There is no opportunity metric here worth modelling: the nflverse release carries no
     field goal attempts by distance for a coming game, and a kicker's volume is decided by
     how far his offense advances.
     """
-    points = sum(
-        weight * season.per_game(column) for column, weight in KICKER_BUCKETS.items()
-    )
+    points = _kicker_average(season)
+    if league_average is not None:
+        played = season.games_played()
+        points = (played * points + KICKER_PRIOR_GAMES * league_average) / (
+            played + KICKER_PRIOR_GAMES
+        )
     return Projection(
         gsis_id=season.gsis_id,
         name=season.name,
@@ -392,13 +426,22 @@ def build_projections(
     stats: list[dict[str, str]],
     through_week: int,
     scoring: Scoring | None = None,
+    recent: bool = True,
 ) -> dict[str, Projection]:
-    """Project every player who has played, keyed by `gsis_id`."""
+    """Project every player who has played, keyed by `gsis_id`.
+
+    `recent=False` weighs every game played equally instead of the last few. That is the
+    long-run role a recent change drifts back toward, used for weeks further ahead.
+    """
     eligible = rows_through(stats, through_week)
     rates = league_rates(eligible)
     resolved = scoring or Scoring()
+    seasons = build_seasons(eligible, through_week)
+    for season in seasons.values():
+        season.recent = recent
+    kicker_average = league_kicker_average(seasons)
     return {
-        gsis_id: project_player(season, rates, resolved)
-        for gsis_id, season in build_seasons(eligible, through_week).items()
+        gsis_id: project_player(season, rates, resolved, kicker_average)
+        for gsis_id, season in seasons.items()
         if season.position not in UNPROJECTABLE_POSITIONS
     }

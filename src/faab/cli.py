@@ -20,6 +20,7 @@ import os
 import json
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -31,7 +32,7 @@ from faab.collectors import nflverse
 from faab.collectors import yahoo
 from faab.collectors import yahoo_auth
 from faab.collectors.sleeper import fetch_players
-from faab.league import ConfigError, League, load_league
+from faab.league import DEFAULT_CLAIM_POSITIONS, ConfigError, League, load_league
 from faab.model.lineup import recommend_lineup
 from faab.model.project import build_projections
 from faab.model.usage import build_usage
@@ -48,7 +49,11 @@ LEAGUE_PATH = REPO_ROOT / "league.toml"
 
 # Players priced as possible claims when the pool comes from Yahoo, best projected first.
 # About the size of the pasted available-players page it replaces.
-MAX_PRICED_CANDIDATES = 150
+MAX_PRICED_PER_POSITION = 30
+
+# The most claims one sheet proposes, and the most fallbacks it lists under them.
+MAX_CLAIMS = 4
+MAX_ALTERNATES = 4
 
 # A pasted projections page older than this is last week's, and is ignored.
 MARKET_MAX_AGE_SECONDS = 4 * 24 * 60 * 60
@@ -340,6 +345,51 @@ def _market_covers(roster: list[Player], market: dict[str, float]) -> bool:
     return bool(held) and all(gsis in market for gsis in held)
 
 
+def _claim_context(
+    roster: list[Player],
+    usage: dict,
+    projections: dict,
+    byes: set[str],
+    week: int,
+    through: int,
+    league: League,
+    market: dict[str, float],
+    protected: frozenset[str] = frozenset(),
+    unmatched: int = 0,
+    byes_by_week: dict[int, set[str]] | None = None,
+    long_run: dict | None = None,
+) -> need.Context:
+    """The pricing context for a claim, valued from `week` through the league's last week.
+
+    `roster` must exclude players in IR slots, since they take no bench space. A pasted
+    roster cannot tell them apart, so it can only overstate how full the roster is.
+    `protected` players are never offered as the drop. `unmatched` counts roster spots held
+    by players who failed to resolve, so they still make the roster full.
+    """
+    return need.Context(
+        roster=roster,
+        usage=usage,
+        projections=projections,
+        byes=byes,
+        week=week,
+        league=league,
+        through_week=through,
+        roster_size=league.starters + league.bench - unmatched,
+        market=market,
+        protected=protected,
+        horizon=tuple(range(week, max(week, league.end_week) + 1)),
+        byes_by_week=byes_by_week or {},
+        long_run=long_run or {},
+    )
+
+
+def _rank_swaps(context: need.Context, pool: list[Player]) -> list:
+    base = need.baseline(context)
+    swaps = [need.best_swap(context, player, base) for player in pool]
+    swaps.sort(key=lambda s: (-s.gain, -s.optimistic_gain))
+    return swaps
+
+
 def _price_swaps(
     pool: list[Player],
     roster: list[Player],
@@ -352,30 +402,87 @@ def _price_swaps(
     market: dict[str, float],
     protected: frozenset[str] = frozenset(),
     unmatched: int = 0,
+    byes_by_week: dict[int, set[str]] | None = None,
 ) -> list:
-    """Every claim in the pool, priced as a swap and ranked by net gain.
-
-    `roster` must exclude players in IR slots, since they take no bench space. A pasted
-    roster cannot tell them apart, so it can only overstate how full the roster is.
-    `protected` players are never offered as the drop. `unmatched` counts roster spots held
-    by players who failed to resolve, so they still make the roster full.
-    """
-    context = need.Context(
-        roster=roster,
-        usage=usage,
-        projections=projections,
-        byes=byes,
-        week=week,
-        league=league,
-        through_week=through,
-        roster_size=league.starters + league.bench - unmatched,
-        market=market,
-        protected=protected,
+    """Every claim in the pool, priced over the rest of the season and ranked by gain."""
+    context = _claim_context(
+        roster, usage, projections, byes, week, through, league, market,
+        protected, unmatched, byes_by_week,
     )
-    base = need.projected_total(need.baseline_lineup(context))
-    swaps = [need.best_swap(context, player, base) for player in pool]
-    swaps.sort(key=lambda s: (-s.gain, -s.optimistic_gain))
-    return need.best_per_position(swaps)
+    return _rank_swaps(context, pool)
+
+
+def _plan_claims(context: need.Context, swaps: list) -> list[tuple]:
+    """The claims to put in together, best first, each with what losing it falls back to.
+
+    Each claim after the first is re-priced on the roster the ones above it leave, so an
+    open bench spot is used once and a second kicker stops looking like an upgrade once the
+    first is in. The fallback is a lesser claim at the same position, priced on the same
+    roster, so a bid compares like with like. A claim that was no upgrade in one round is
+    not re-priced in the next, since adding players only lowers what others add.
+    """
+    plan: list[tuple] = []
+    round_swaps = list(swaps)
+    current = context
+    while len(plan) < MAX_CLAIMS:
+        ranked = [s for s in round_swaps if s.is_upgrade]
+        if not ranked:
+            break
+        pick = ranked[0]
+        others = [
+            s.gain
+            for s in round_swaps
+            if s.add.position == pick.add.position and s.add.marker != pick.add.marker
+        ]
+        plan.append((pick, waiver_model.replacement_value(others)))
+        current = replace(
+            need.valued_at(current, pick.add, pick.add_points),
+            roster=[*(p for p in current.roster if p is not pick.drop), pick.add],
+            protected=current.protected | {pick.add.marker},
+        )
+        round_swaps = _rank_swaps(current, [s.add for s in ranked[1:]])
+    return plan
+
+
+def _fallbacks(swaps: list, planned: set[str]) -> list[tuple]:
+    """The best unplanned claim at each position, with its own fallback, first pass only."""
+    chosen = need.best_per_position(
+        [s for s in swaps if s.is_upgrade and s.add.marker not in planned], limit=1
+    )[:MAX_ALTERNATES]
+    return [
+        (
+            swap,
+            waiver_model.replacement_value(
+                [
+                    s.gain
+                    for s in swaps
+                    if s.add.position == swap.add.position and s.add.marker != swap.add.marker
+                ]
+            ),
+        )
+        for swap in chosen
+    ]
+
+
+def _claim_bids(
+    claims: list[tuple],
+    budget: int,
+    rival_budgets: list[int],
+    effective_weeks: float,
+    winning_bids: dict[str, list[int]],
+) -> dict[str, int]:
+    """Each claim's bid, from what it adds over its fallback across the season."""
+    return {
+        swap.add.name: waiver_model.bid_for_claim(
+            swap.gain,
+            replacement,
+            budget,
+            effective_weeks,
+            rival_budgets=rival_budgets,
+            cap=waiver_model.market_cap(winning_bids.get(swap.add.position, [])),
+        )
+        for swap, replacement in claims
+    }
 
 
 def _configured_keepers(roster: list[Player], league: League) -> frozenset[str]:
@@ -468,15 +575,21 @@ def _market_is_fresh(data_dir: Path) -> bool:
 def _yahoo_pool(
     projections: dict, index: NameIndex, state: yahoo_state.LeagueState, league: League
 ) -> list[Player]:
-    """Unrostered players worth pricing, best projected first.
+    """Unrostered players worth pricing, best projected first, capped per position.
 
     Everyone not on a roster in the league is claimable through FAAB, free agent or on
-    waivers alike, so the pool is the complement of the rosters rather than a page.
+    waivers alike, so the pool is the complement of the rosters rather than a page. Every
+    claimable position is priced, including ones `claim_positions` leaves out, because a
+    position the owner does not want suggestions at can still have a hole this week.
     """
+    positions = _pool_positions(league)
     pool: list[Player] = []
+    counts: dict[str, int] = {}
     ranked = sorted(projections.values(), key=lambda p: -p.points)
     for projection in ranked:
-        if projection.position not in league.claim_positions:
+        if projection.position not in positions:
+            continue
+        if counts.get(projection.position, 0) >= MAX_PRICED_PER_POSITION:
             continue
         player, _ = index.resolve(projection.name, projection.position, projection.team)
         if player is None or player.gsis_id != projection.gsis_id:
@@ -484,9 +597,18 @@ def _yahoo_pool(
         if state.is_rostered(player):
             continue
         pool.append(player)
-        if len(pool) >= MAX_PRICED_CANDIDATES:
-            break
+        counts[projection.position] = counts.get(projection.position, 0) + 1
     return pool
+
+
+def _pool_positions(league: League) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*league.claim_positions, *DEFAULT_CLAIM_POSITIONS)))
+
+
+def _shown_positions(context: need.Context, league: League) -> tuple[set[str], set[str]]:
+    """Positions the sheet may suggest, and the excluded ones let in by a hole this week."""
+    holes = need.open_positions(context, _pool_positions(league)) - set(league.claim_positions)
+    return set(league.claim_positions) | holes, holes
 
 
 def cmd_waivers(args: argparse.Namespace) -> int:
@@ -516,6 +638,10 @@ def cmd_waivers(args: argparse.Namespace) -> int:
     )
     projections = build_projections(stats, through_week=through, scoring=league.scoring)
     byes = nflverse.teams_on_bye(games, league.season, week)
+    byes_by_week = {
+        later: nflverse.teams_on_bye(games, league.season, later)
+        for later in range(week, league.end_week + 1)
+    }
 
     trending = {
         row["name"]: row["count"]
@@ -542,10 +668,8 @@ def cmd_waivers(args: argparse.Namespace) -> int:
         available, available_problems = _load_available(args.data, index)
         rival_budgets, own_budget = _load_budgets(args.data, league)
         market = _load_market(args.data, index)
-        pool = [
-            p for p in _available_players(args.data, index)
-            if p.position in league.claim_positions
-        ]
+        positions = _pool_positions(league)
+        pool = [p for p in _available_players(args.data, index) if p.position in positions]
 
     banner = _fallback_banner(
         "\n".join([*([fallback_note] if fallback_note else []), *keeper_gaps])
@@ -559,23 +683,27 @@ def cmd_waivers(args: argparse.Namespace) -> int:
         return _maybe_send(args, body, week)
 
     if pool:
-        swaps = _price_swaps(
-            pool, swap_roster, usage, projections, byes, week, through, league, market,
-            protected, unmatched,
+        context = _claim_context(
+            swap_roster, usage, projections, byes, week, through, league, market,
+            protected, unmatched, byes_by_week,
+            build_projections(stats, through_week=through, scoring=league.scoring, recent=False),
         )
-        gains = [s.gain for s in swaps]
-        bids = {
-            s.add.name: waiver_model.bid_for_swap(
-                s.gain,
-                [g for g in gains if g is not s.gain],
-                own_budget,
-                rival_budgets=rival_budgets,
-            )
-            for s in swaps
-        }
+        shown, holes = _shown_positions(context, league)
+        swaps = [s for s in _rank_swaps(context, pool) if s.add.position in shown]
+        planned_claims = _plan_claims(context, swaps)
+        fallback_claims = _fallbacks(swaps, {s.add.marker for s, _ in planned_claims})
+        plan = [s for s, _ in planned_claims]
+        alternates = [s for s, _ in fallback_claims]
+        bids = _claim_bids(
+            planned_claims + fallback_claims,
+            own_budget,
+            rival_budgets,
+            context.effective_weeks,
+            state.winning_bids if state is not None else {},
+        )
         rivals_able = sum(1 for b in rival_budgets if b >= own_budget * 0.12)
         body = report.fit_swaps_to_ntfy(
-            swaps,
+            plan,
             week,
             own_budget,
             bids,
@@ -583,6 +711,12 @@ def cmd_waivers(args: argparse.Namespace) -> int:
             rival_count=len(rival_budgets),
             market_covers_roster=_market_covers(roster, market),
             max_bytes=budget_bytes,
+            alternates=alternates,
+            notes={
+                s.add.name: f"fills your {s.add.position} hole this week"
+                for s in plan + alternates
+                if s.add.position in holes
+            },
         )
         body = banner + body
         if failed:

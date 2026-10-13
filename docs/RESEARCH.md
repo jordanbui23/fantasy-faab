@@ -508,6 +508,29 @@ The kickoff time comes from nflverse's `games.csv`, whose `gametime` is Eastern 
 time (**`supported`**, nflverse data dictionary). It agreed with the lock times above: the
 4:25pm game read `16:25` and its players were still editable at 4:24pm Eastern.
 
+## 7i. Injury designations, and when an unrostered player can be claimed
+
+**`supported`, two independent sources.** About 70% of players listed questionable on
+the final injury report play: 68.26% over 2017 to 2024 per
+[Banged Up Bills, 2025-07-12](https://bangedupbills.com/2025/07/12/how-do-the-buffalo-bills-compare-against-the-nfl-utilizing-the-questionable-designation/),
+and 70.7% per [Footballguys, 2025-09-13](https://www.footballguys.com/article/2025-chance-to-play-questionable-vs-doubtful).
+Doubtful players almost never play: 1.25% and 6.9% in the same two sources.
+`model/need.py` uses 0.70 and 0.05. These are final-report rates. A designation read on
+a Tuesday is often last week's, so it is a weaker signal than the number suggests.
+
+**`supported`, two sources.** A player placed on NFL injured reserve must miss at least
+four games before he can return ([nfl.com, 2022-05-26](https://www.nfl.com/news/players-now-eligible-to-return-from-injured-reserve-after-four-games);
+[Pro Football Rumors, 2024-06-21](https://www.profootballrumors.com/2024/06/nfl-issues-new-rules-for-ir-activations)).
+That is why `LONG_TERM_STATUSES` hold for `LONG_TERM_WEEKS` in the claim valuation and
+every other status for one week.
+
+**`supported`, one observation, 2026-10-13 about 5:20pm Eastern.** League settings read
+`waiver_rule: gametime`, `waiver_time: 2` and `uses_faab: 1`. Every unrostered player
+checked through `players;search=...;out=ownership` carried `ownership_type: waivers` with
+a `waiver_date` of the next day. A Wednesday read the week before found most of the same
+kind of players as free agents. So the Tuesday sheet's bids are real FAAB bids, and a
+player nobody claims can be added for nothing once his waiver date passes.
+
 ## 8. Open questions
 
 - ~~**Keeper cost for an undrafted waiver add.**~~ **Closed 2026-09-23, `confirmed`

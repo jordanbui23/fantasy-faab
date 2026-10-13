@@ -99,6 +99,7 @@ class LeagueState:
     entry_for: dict[str, YahooPlayer] = field(default_factory=dict)
     keepers: set[str] = field(default_factory=set)
     reserve: set[str] = field(default_factory=set)
+    winning_bids: dict[str, list[int]] = field(default_factory=dict)
 
     @property
     def unmatched_active(self) -> int:
@@ -180,6 +181,13 @@ def load_state(client: Getter, league: League, index: NameIndex, week: int) -> L
                     state.keepers.add(marker(player))
                 if entry.selected_position == "IR":
                     state.reserve.add(marker(player))
+    try:
+        for bid in yahoo.completed_bids(client, league_key):
+            if bid.position:
+                state.winning_bids.setdefault(bid.position, []).append(bid.amount)
+    except yahoo.YahooError:
+        # The bid history only caps bids. Losing it costs a cap, never the sheet.
+        state.winning_bids = {}
     return state
 
 

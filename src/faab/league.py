@@ -113,6 +113,7 @@ class League:
     scoring: Scoring = field(default_factory=Scoring)
     yahoo_league_id: int = 0
     bench: int = 5
+    end_week: int = 17
     keepers: tuple[str, ...] = ()
     claim_positions: tuple[str, ...] = DEFAULT_CLAIM_POSITIONS
 
@@ -211,8 +212,10 @@ def load_league(path: Path) -> League:
     season = raw.get("season", 2026)
     yahoo_league_id = raw.get("yahoo_league_id", 0)
     bench = raw.get("bench", 5)
+    end_week = raw.get("end_week", 17)
     for label, value, low in (
         ("bench", bench, 0),
+        ("end_week", end_week, 1),
         ("teams", teams, 2),
         ("faab_budget", budget, 0),
         ("season", season, 1999),
@@ -231,6 +234,7 @@ def load_league(path: Path) -> League:
         own_team=str(raw.get("own_team", "")),
         yahoo_league_id=yahoo_league_id,
         bench=bench,
+        end_week=end_week,
         keepers=_read_keepers(raw.get("keepers"), _origin(path, local, "keepers")),
         claim_positions=_read_claim_positions(
             raw.get("claim_positions"), _origin(path, local, "claim_positions")

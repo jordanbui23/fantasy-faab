@@ -26,6 +26,9 @@ claim_positions = ["QB", "RB", "WR", "TE", "K"]
 # Bench spots. IR slots are separate and are not counted here.
 bench = 5
 
+# The last week the league plays, playoffs included. A claim is valued through it.
+end_week = 17
+
 # Starting slots, read off the Yahoo roster page: 10 starters and 5 bench.
 # FLEX is Yahoo's W/R/T.
 [slots]

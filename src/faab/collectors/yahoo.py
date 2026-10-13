@@ -82,6 +82,7 @@ class Bid:
     player_name: str
     amount: int
     timestamp: int
+    position: str = ""
 
 
 def nfl_team(abbr: str) -> str:
@@ -367,6 +368,7 @@ def completed_bids(client: Getter, league_key: str) -> list[Bid]:
                             player_name=str(name.get("full") if isinstance(name, dict) else name or ""),
                             amount=amount,
                             timestamp=_int_or_none(meta.get("timestamp")) or 0,
+                            position=str(pmeta.get("display_position") or "").split(",")[0],
                         )
                     )
     return bids

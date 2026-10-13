@@ -11,6 +11,7 @@ better as aligned columns than as bullets on a phone.
 
 from __future__ import annotations
 
+from faab.model.need import WEEKLY_DECAY
 from faab.model.lineup import Lineup
 from faab.model.waiver import Candidate as WaiverCandidate
 
@@ -199,13 +200,16 @@ def render_swaps(
     rivals_able: int = 0,
     rival_count: int = 0,
     market_covers_roster: bool = True,
+    alternates: list | tuple = (),
+    notes: dict[str, str] | None = None,
 ) -> str:
-    """Render waiver claims as add/drop pairs.
+    """Render waiver claims as add/drop pairs, then the fallbacks.
 
     A full roster makes every claim a swap, so naming only the player to add hides half the
     decision and all of its cost. Each line carries the drop, both projections where they
-    disagree, and the net weekly gain of the pair.
+    disagree, and what the pair adds this week and over the season.
     """
+    notes = notes or {}
     parts = [f"WEEK {week} WAIVERS", ""]
     parts.append(f"Budget ${budget}." + (
         f" {rivals_able} of {rival_count} rivals can outbid." if rival_count else ""
@@ -219,8 +223,9 @@ def render_swaps(
         parts.append("No claim improves the lineup enough to matter. Hold the budget.")
     for position, swap in enumerate(upgrades, start=1):
         bid = bids.get(swap.add.name, 1)
+        note = f" ({notes[swap.add.name]})" if swap.add.name in notes else ""
         parts.append(
-            f"{position}. ${bid} ADD {swap.add.name} {swap.add.position}/{swap.add.team}"
+            f"{position}. ${bid} ADD {swap.add.name} {swap.add.position}/{swap.add.team}{note}"
         )
         if swap.drop is None:
             parts.append("       DROP nobody, roster has room")
@@ -231,18 +236,30 @@ def render_swaps(
                 f"       DROP {swap.drop.name} {swap.drop.position}/{swap.drop.team}"
                 f" ({role}{blocked}, {swap.drop_points:.1f})"
             )
-        line = f"       net {swap.gain:+.1f}/wk"
+        line = f"       {swap.week_gain:+.1f} this week, {swap.gain:+.1f} season"
         if swap.market_points is not None:
             line += f"  mine {swap.model_points:.1f} vs Yahoo {swap.market_points:.1f}"
         parts.append(line)
         if swap.disputed:
             parts.append(
-                f"       DISPUTED: worth {swap.optimistic_gain:+.1f}/wk on my number"
+                f"       DISPUTED: worth {swap.optimistic_gain:+.1f} season on my number"
+            )
+
+    fallbacks = [s for s in alternates if s.is_upgrade]
+    if fallbacks:
+        parts.append("")
+        parts.append("IF OUTBID")
+        for swap in fallbacks:
+            note = f" ({notes[swap.add.name]})" if swap.add.name in notes else ""
+            parts.append(
+                f"  ${bids.get(swap.add.name, 1)} {swap.add.name} {swap.add.position}/"
+                f"{swap.add.team} {swap.gain:+.1f} season{note}"
             )
 
     parts.append("")
-    parts.append("Bids priced on the lower projection and on what each claim adds")
-    parts.append("over the next best alternative, not over your current lineup.")
+    parts.append(f"Season counts each week ahead {round((1 - WEEKLY_DECAY) * 100)}% less. Each claim assumes")
+    parts.append("the ones above it went through. Bids price what a claim adds")
+    parts.append("over a lesser player at his position, on the lower projection.")
     if not market_covers_roster:
         parts.append("No Yahoo numbers for your own roster, so a drop is valued on my")
         parts.append("projection alone. That overstates a claim when I underrate the drop.")
@@ -258,13 +275,16 @@ def fit_swaps_to_ntfy(
     rival_count: int = 0,
     market_covers_roster: bool = True,
     max_bytes: int = NTFY_MAX_BYTES,
+    alternates: list | tuple = (),
+    notes: dict[str, str] | None = None,
 ) -> str:
-    """Render the swap sheet, dropping the lowest-value claims until it fits."""
-    shown = list(swaps)
+    """Render the swap sheet, dropping fallbacks and then the lowest claims until it fits."""
+    shown, spare = list(swaps), list(alternates)
     while True:
         text = render_swaps(
-            shown, week, budget, bids, rivals_able, rival_count, market_covers_roster
+            shown, week, budget, bids, rivals_able, rival_count, market_covers_roster,
+            spare, notes,
         )
-        if len(text.encode("utf-8")) <= max_bytes or not shown:
+        if len(text.encode("utf-8")) <= max_bytes or not (shown or spare):
             return text
-        shown.pop()
+        (spare or shown).pop()

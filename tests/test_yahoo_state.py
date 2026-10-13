@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from faab import cli, yahoo_state  # noqa: E402
+from faab import cli, report, yahoo_state  # noqa: E402
+from faab.model import need  # noqa: E402
 from faab.collectors import yahoo  # noqa: E402
 from faab.collectors.yahoo import YahooPlayer, YahooTeam  # noqa: E402
 from faab.league import League  # noqa: E402
@@ -130,7 +132,24 @@ def state(monkeypatch):
         lambda c, k: [YahooTeam("T1", "Mine", 88, 4, True), YahooTeam("T2", "Them", 40, 1, False), YahooTeam("T3", "Other", None, 2, False)],
     )
     monkeypatch.setattr(yahoo, "league_rosters", lambda c, k, w: {"T1": mine, "T2": rival, "T3": [entry("Other Guy", slot="QB", position="QB")]})
+    monkeypatch.setattr(
+        yahoo,
+        "completed_bids",
+        lambda c, k: [yahoo.Bid("T2", "A Kicker", 0, 1, "K"), yahoo.Bid("T3", "B Kicker", 3, 2, "K"), yahoo.Bid("T2", "Nobody", 4, 3)],
+    )
     return yahoo_state.load_state(StubClient(), League(), INDEX, 5)
+
+
+def test_winning_bids_are_kept_by_position(state):
+    assert state.winning_bids == {"K": [0, 3]}
+
+
+def test_a_bid_history_failure_costs_only_the_history(monkeypatch, state):
+    def fail(c, k):
+        raise yahoo.YahooError("down")
+
+    monkeypatch.setattr(yahoo, "completed_bids", fail)
+    assert yahoo_state.load_state(StubClient(), League(), INDEX, 5).winning_bids == {}
 
 
 def test_a_rival_without_a_roster_is_an_error_not_an_open_pool(monkeypatch):
@@ -221,9 +240,19 @@ def test_the_pool_is_unrostered_players_at_claimable_positions_best_first(state)
         "00-1": _projection("Alan Starter", "WR", "PHI", "00-1", 15.0),
     }
     league = League(claim_positions=("RB", "WR", "TE", "K"))
-    pool = cli._yahoo_pool(projections, INDEX, state, league)
-    assert [p.name for p in pool] == ["Dee Free"]
+    # An excluded position is still priced, because it can have a hole this week.
+    assert [p.name for p in cli._yahoo_pool(projections, INDEX, state, league)] == ["Eve Free", "Dee Free"]
     assert [p.name for p in cli._yahoo_pool(projections, INDEX, state, League())] == ["Eve Free", "Dee Free"]
+
+
+def test_the_pool_is_capped_per_position_not_overall(state, monkeypatch):
+    monkeypatch.setattr(cli, "MAX_PRICED_PER_POSITION", 1)
+    projections = {
+        "00-4": _projection("Dee Free", "TE", "MIA", "00-4", 8.0),
+        "00-5": _projection("Eve Free", "QB", "MIA", "00-5", 18.0),
+        "00-6": _projection("Same Name", "WR", "NYJ", "00-6", 30.0),
+    }
+    assert {p.name for p in cli._yahoo_pool(projections, INDEX, state, League())} == {"Eve Free", "Dee Free", "Same Name"}
 
 
 # --- waivers wiring --------------------------------------------------------------------------
@@ -269,7 +298,7 @@ def test_the_fallback_warning_leads_the_swap_sheet(waivers_env, monkeypatch, cap
     note = "Yahoo unavailable, so pasted files were used: 503"
     monkeypatch.setattr(cli, "_league_state", lambda args, league, index, week: (None, note))
     monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
-    monkeypatch.setattr(cli, "_price_swaps", lambda *a, **k: [])
+    monkeypatch.setattr(cli, "_rank_swaps", lambda *a, **k: [])
     (tmp_path / "roster.txt").write_text("Alan Starter\n", encoding="utf-8")
     argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
             "--roster", str(tmp_path / "roster.txt"), "waivers"]
@@ -344,11 +373,11 @@ def test_the_paste_fallback_protects_configured_keepers(waivers_env, monkeypatch
     monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
     seen = []
 
-    def record(pool, roster, usage, projections, byes, week, through, league, market, protected, unmatched):
-        seen.append(protected)
+    def record(context, pool):
+        seen.append(context.protected)
         return []
 
-    monkeypatch.setattr(cli, "_price_swaps", record)
+    monkeypatch.setattr(cli, "_rank_swaps", record)
     (tmp_path / "roster.txt").write_text("Alan Starter\nSame Name WR NYJ\n", encoding="utf-8")
     (tmp_path / "league.toml").write_text('keepers = ["Alan Starter"]\n', encoding="utf-8")
     argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
@@ -360,7 +389,7 @@ def test_the_paste_fallback_protects_configured_keepers(waivers_env, monkeypatch
 def test_a_keeper_name_that_matches_nobody_is_named_in_the_banner(waivers_env, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "_league_state", lambda args, league, index, week: (None, ""))
     monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
-    monkeypatch.setattr(cli, "_price_swaps", lambda *a, **k: [])
+    monkeypatch.setattr(cli, "_rank_swaps", lambda *a, **k: [])
     (tmp_path / "roster.txt").write_text("Alan Starter\n", encoding="utf-8")
     (tmp_path / "league.toml").write_text('keepers = ["Alan Startr"]\n', encoding="utf-8")
     argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
@@ -372,7 +401,7 @@ def test_a_keeper_name_that_matches_nobody_is_named_in_the_banner(waivers_env, m
 def test_a_pasted_roster_with_no_keepers_set_says_so(waivers_env, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "_league_state", lambda args, league, index, week: (None, ""))
     monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
-    monkeypatch.setattr(cli, "_price_swaps", lambda *a, **k: [])
+    monkeypatch.setattr(cli, "_rank_swaps", lambda *a, **k: [])
     (tmp_path / "roster.txt").write_text("Alan Starter\n", encoding="utf-8")
     argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
             "--roster", str(tmp_path / "roster.txt"), "waivers"]
@@ -393,11 +422,11 @@ def test_unconfirmed_keeper_protection_names_no_drop(waivers_env, monkeypatch, t
     monkeypatch.setattr(cli, "_available_players", lambda data, index: [player("Dee Free", position="TE", gsis="00-4")])
     seen = []
 
-    def record(pool, roster, usage, projections, byes, week, through, league, market, protected, unmatched):
-        seen.append((protected, {p.marker for p in roster}))
+    def record(context, pool):
+        seen.append((context.protected, {p.marker for p in context.roster}))
         return []
 
-    monkeypatch.setattr(cli, "_price_swaps", record)
+    monkeypatch.setattr(cli, "_rank_swaps", record)
     (tmp_path / "roster.txt").write_text("Alan Starter\nSame Name WR NYJ\n", encoding="utf-8")
     (tmp_path / "league.toml").write_text(keepers, encoding="utf-8")
     argv = ["--data", str(tmp_path), "--league", str(tmp_path / "league.toml"),
@@ -405,3 +434,95 @@ def test_unconfirmed_keeper_protection_names_no_drop(waivers_env, monkeypatch, t
     assert cli.main(argv) == 0
     protected, roster = seen[0]
     assert roster and protected == frozenset(roster)
+
+
+
+# --- the claim plan -------------------------------------------------------------------
+
+
+def _plan_context(roster, points, league, roster_size, protected=frozenset()):
+    projections = {p.gsis_id: _projection(p.name, p.position, p.team, p.gsis_id, points[p.name]) for p in roster}
+    return need.Context(
+        roster=roster, usage={}, projections=projections, byes=set(), week=5, league=league,
+        through_week=4, roster_size=roster_size, horizon=(5, 6), protected=protected,
+    )
+
+
+def test_an_open_spot_is_used_by_one_claim_only():
+    league = League(slots={"WR": 2}, bench=1)
+    roster = [player("Alan Starter", gsis="00-1"), player("Same Name", team="NYJ", gsis="00-6")]
+    adds = [player("Dee Free", position="WR", team="MIA", gsis="00-4"), player("Eve Free", position="WR", team="MIA", gsis="00-5")]
+    points = {"Alan Starter": 10.0, "Same Name": 4.0, "Dee Free": 12.0, "Eve Free": 11.0}
+    context = _plan_context(roster, points, league, roster_size=3)
+    context.projections.update({p.gsis_id: _projection(p.name, p.position, p.team, p.gsis_id, points[p.name]) for p in adds})
+    plan = cli._plan_claims(context, cli._rank_swaps(context, adds))
+    assert [s.add.name for s, _ in plan] == ["Dee Free", "Eve Free"]
+    assert plan[0][0].drop is None
+    assert plan[1][0].drop is not None and plan[1][0].drop.name == "Same Name"
+
+
+def test_a_second_kicker_is_not_planned_once_the_first_is_in():
+    league = League(slots={"K": 1}, bench=2)
+    held = [player("Alan Starter", position="K", team="SEA", gsis="00-1")]
+    adds = [player("Dee Free", position="K", team="MIA", gsis="00-4"), player("Eve Free", position="K", team="MIA", gsis="00-5")]
+    points = {"Alan Starter": 0.0, "Dee Free": 8.0, "Eve Free": 7.9}
+    context = _plan_context(held, points, league, roster_size=3)
+    context = replace(context, byes={"SEA"}, byes_by_week={5: {"SEA"}})
+    context.projections.update({p.gsis_id: _projection(p.name, p.position, p.team, p.gsis_id, points[p.name]) for p in adds})
+    swaps = cli._rank_swaps(context, adds)
+    plan = cli._plan_claims(context, swaps)
+    assert [s.add.name for s, _ in plan] == ["Dee Free"]
+    bids = cli._claim_bids(plan, 100, [100] * 9, context.effective_weeks, {"K": [0, 0, 3]})
+    assert bids == {"Dee Free": 1}
+
+
+def test_an_excluded_position_is_shown_only_with_a_hole_this_week():
+    league = League(slots={"QB": 1, "WR": 1}, claim_positions=("WR",))
+    roster = [player("Alan Starter", gsis="00-1"), player("Eve Free", position="QB", team="MIA", gsis="00-5")]
+    points = {"Alan Starter": 10.0, "Eve Free": 18.0}
+    context = _plan_context(roster, points, league, roster_size=4)
+    assert cli._shown_positions(context, league) == ({"WR"}, set())
+    context = replace(context, byes={"MIA"})
+    assert cli._shown_positions(context, league) == ({"WR", "QB"}, {"QB"})
+
+
+def test_the_sheet_lists_fallbacks_and_trims_them_first():
+    league = League(slots={"WR": 1})
+    roster = [player("Alan Starter", gsis="00-1")]
+    adds = [player("Dee Free", position="WR", team="MIA", gsis="00-4"), player("Eve Free", position="QB", team="MIA", gsis="00-5")]
+    points = {"Alan Starter": 5.0, "Dee Free": 9.0, "Eve Free": 8.0}
+    context = _plan_context(roster, points, League(slots={"WR": 1, "QB": 1}), roster_size=3)
+    context.projections.update({p.gsis_id: _projection(p.name, p.position, p.team, p.gsis_id, points[p.name]) for p in adds})
+    swaps = cli._rank_swaps(context, adds)
+    plan, alternates = [swaps[0]], [swaps[1]]
+    notes = {"Eve Free": "fills your QB hole this week"}
+    assert [s.add.name for s in plan + alternates] == ["Eve Free", "Dee Free"]
+    full = report.render_swaps(plan, 5, 100, {}, alternates=alternates, notes=notes)
+    assert "IF OUTBID" in full and "Dee Free" in full and "QB hole" in full
+    assert "this week" in full and "season" in full
+    trimmed = report.fit_swaps_to_ntfy(plan, 5, 100, {}, alternates=alternates, notes=notes, max_bytes=len(full.encode()) - 1)
+    assert "IF OUTBID" not in trimmed and "Eve Free" in trimmed
+
+
+def test_the_league_market_caps_a_planned_bid():
+    kicker = player("Dee Free", position="K", team="MIA", gsis="00-4")
+    swap = need.Swap(add=kicker, drop=None, gain=30.0, add_points=8.0, drop_points=0.0, drop_was_starter=False)
+    uncapped = cli._claim_bids([(swap, 0.0)], 100, [100] * 9, 5.0, {})
+    capped = cli._claim_bids([(swap, 0.0)], 100, [100] * 9, 5.0, {"K": [0, 0, 3]})
+    assert uncapped["Dee Free"] > 4 and capped == {"Dee Free": 4}
+
+
+def test_later_claims_are_priced_against_the_earlier_claims_lower_number(monkeypatch):
+    league = League(slots={"WR": 1}, bench=2)
+    roster = [player("Alan Starter", gsis="00-1")]
+    adds = [player("Dee Free", position="WR", team="MIA", gsis="00-4"), player("Eve Free", position="WR", team="MIA", gsis="00-5")]
+    points = {"Alan Starter": 3.0, "Dee Free": 12.0, "Eve Free": 5.0}
+    context = _plan_context(roster, points, league, roster_size=3)
+    context.projections.update({p.gsis_id: _projection(p.name, p.position, p.team, p.gsis_id, points[p.name]) for p in adds})
+    context = replace(context, market={"00-4": 9.0})
+    swaps = cli._rank_swaps(context, adds)
+    seen = []
+    real = cli._rank_swaps
+    monkeypatch.setattr(cli, "_rank_swaps", lambda ctx, pool: seen.append(ctx) or real(ctx, pool))
+    cli._plan_claims(context, swaps)
+    assert seen and seen[0].projections["00-4"].points == pytest.approx(9.0)

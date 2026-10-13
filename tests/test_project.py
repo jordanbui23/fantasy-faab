@@ -310,6 +310,20 @@ def test_a_kicker_is_projected_from_his_own_scoring():
     assert _points(rows)["Boot"] == pytest.approx(2 * 4 + 3)
 
 
+def test_a_big_kicking_start_is_shrunk_toward_the_league():
+    rows = [
+        _row(w, name="Hot", position="K", gsis="a", fg_made_50_59=3, pat_made=3)
+        for w in (1, 2)
+    ] + [
+        _row(w, name="Cold", position="K", gsis="b", fg_made_30_39=1, pat_made=2)
+        for w in (1, 2)
+    ]
+    points = _points(rows)
+    league = (18 + 5) / 2
+    assert points["Hot"] == pytest.approx((2 * 18 + 8 * league) / 10)
+    assert points["Cold"] == pytest.approx((2 * 5 + 8 * league) / 10)
+
+
 def test_a_defense_is_not_projected():
     rows = [_row(1, name="Hawks", position="DEF", gsis="a")]
     assert build_projections(rows, 2) == {}

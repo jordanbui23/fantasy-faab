@@ -54,7 +54,7 @@ The rival-bidding model, which is the actual edge, is unblocked and not yet buil
 | `src/faab/model/usage.py` | working, recency-weighted usage per player |
 | `src/faab/model/project.py` | working, projects points from volume |
 | `src/faab/model/assign.py` | working, exact slot assignment |
-| `src/faab/model/need.py` | working, prices each claim as an add/drop swap |
+| `src/faab/model/need.py` | working, prices each claim as an add/drop swap over the rest of the season |
 | `src/faab/model/lineup.py` | working, Sunday start/sit |
 | `src/faab/model/waiver.py` | working as a stopgap, no rival model yet |
 | `src/faab/report.py` | working, plain text under the notification limit |
@@ -131,6 +131,25 @@ slot in turn loses points whenever two slots accept different position sets: a r
 found a case where it left a slot empty with an eligible player on the bench. The problem
 is tiny, a dozen slots against two dozen players, so `model/assign.py` solves it exactly
 and its tests check every answer against brute force.
+
+A claim is valued over the rest of the season, not over the coming week. `model/need.py`
+solves the best lineup for every week from now through `end_week`, with each week's byes,
+and sums the gain of the add and drop, each week ahead weighted down by `WEEKLY_DECAY`. This week's
+injury designations apply in full, with a questionable or doubtful starter weighed by his
+odds of playing. IR and other long-term statuses hold for `LONG_TERM_WEEKS`, and anything shorter
+is assumed cleared by next week. A recent role drifts back toward the player's season-long
+one at `ROLE_PERSISTENCE` per week, so a back filling in for an injured starter is not paid
+for in every later week. `WEEKLY_DECAY` and `ROLE_PERSISTENCE` are judgment calls that no
+backtest has checked yet. Sources for the injury figures are in `docs/RESEARCH.md` section 7i.
+
+The bid prices what a claim adds over its fallback, a lesser claim at the same position,
+so a deep position such as kicker earns a dollar. A gain of `GAIN_FOR_MAX_BID` points in
+every week of the horizon earns the largest bid, so filling one bye week earns a fraction of it. Once
+this league has paid for a position a few times, no bid goes more than a dollar over the
+most it has paid there. The sheet proposes up to `MAX_CLAIMS` claims together: the first may use
+an open bench spot, and each one after it is re-priced on the roster the ones above it
+leave. A best fallback per position follows under "IF OUTBID". A position left out of
+`claim_positions` still appears when this week's lineup has a hole there.
 
 Ranking a waiver claim and sizing its bid pull in opposite directions, and both are
 right. An unnoticed player is the better find, so being unchased lifts him up the

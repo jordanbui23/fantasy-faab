@@ -22,7 +22,8 @@ cannot reach the flex scores zero too, however sharply his snaps rose.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field, replace
 
 from faab.league import League
 from faab.model.lineup import Lineup, recommend_lineup
@@ -45,6 +46,23 @@ UNAVAILABLE_STATUSES = frozenset({"IR", "OUT", "PUP", "SUS", "NA", "COV", "DNR"}
 # projection sits within about 2.5 points of Yahoo's on average, so a gap of 3 is outside
 # ordinary disagreement.
 DISPUTE_POINTS = 3.0
+
+# The odds a player with each designation plays. Sourced in docs/RESEARCH.md section 7i.
+PLAY_ODDS = {"QUESTIONABLE": 0.70, "DOUBTFUL": 0.05}
+
+# Statuses that keep a player out for several games rather than one, held for
+# LONG_TERM_WEEKS. Section 7i of docs/RESEARCH.md has the injured-reserve minimum.
+LONG_TERM_STATUSES = frozenset({"IR", "PUP", "NA", "SUS"})
+LONG_TERM_WEEKS = 4
+
+# Each week ahead counts this much less than the one before. Roles revert and injured
+# starters come back, so a projection drawn from recent games describes the next game best.
+WEEKLY_DECAY = 0.85
+
+# How much of a recent role survives each week ahead; the rest drifts back to the player's
+# season-long role. A back who took over for an injured starter keeps the job only until
+# the starter returns, and the same projection must not be paid for in every later week.
+ROLE_PERSISTENCE = 0.75
 
 
 def conservative_points(model: float, market: float | None) -> float:
@@ -74,15 +92,92 @@ class Context:
     roster_size: int = 15
     market: dict[str, float] | None = None
     protected: frozenset[str] = frozenset()
+    horizon: tuple[int, ...] = ()
+    byes_by_week: Mapping[int, set[str]] = field(default_factory=dict)
+    decay: float = WEEKLY_DECAY
+    long_run: Mapping[str, Projection] = field(default_factory=dict)
+    persistence: float = ROLE_PERSISTENCE
+    _cache: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @property
     def is_full(self) -> bool:
         return len(self.roster) >= self.roster_size
 
+    @property
+    def weeks(self) -> tuple[int, ...]:
+        """The weeks a claim is valued over. An empty horizon means this week alone."""
+        return self.horizon or (self.week,)
+
+    @property
+    def effective_weeks(self) -> float:
+        """The horizon's total weight, in this-week equivalents."""
+        return sum(self.weight(week) for week in self.weeks)
+
+    def weight(self, week: int) -> float:
+        return self.decay ** max(0, week - self.week)
+
+    def projections_for(self, week: int) -> Mapping[str, Projection]:
+        """This week's projections, blended toward the long-run role for later weeks."""
+        if week <= self.week or not self.long_run:
+            return self.projections
+        key = ("blend", week)
+        if key not in self._cache:
+            keep = self.persistence ** (week - self.week)
+            self._cache[key] = _Blend(self.projections, self.long_run, keep)
+        return self._cache[key]
+
+    def byes_in(self, week: int) -> set[str]:
+        if week == self.week:
+            return self.byes
+        return set(self.byes_by_week.get(week, ()))
+
+
+class _Blend(Mapping):
+    """Projections blended on lookup, since a lineup reads a few dozen of several hundred."""
+
+    def __init__(
+        self, recent: Mapping[str, Projection], long_run: Mapping[str, Projection], keep: float
+    ) -> None:
+        self._recent, self._long_run, self._keep = recent, long_run, keep
+        self._memo: dict[str, Projection] = {}
+
+    def __getitem__(self, gsis_id: str) -> Projection:
+        if gsis_id not in self._memo:
+            projection = self._recent[gsis_id]
+            settled = self._long_run.get(gsis_id)
+            self._memo[gsis_id] = (
+                projection
+                if settled is None
+                else replace(
+                    projection,
+                    points=self._keep * projection.points + (1.0 - self._keep) * settled.points,
+                )
+            )
+        return self._memo[gsis_id]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._recent)
+
+    def __len__(self) -> int:
+        return len(self._recent)
+
+
+@dataclass(frozen=True)
+class SeasonValue:
+    """A roster's value over the horizon, and the parts a swap is checked against."""
+
+    value: float
+    this_week: float
+    unfilled: tuple[int, ...]
+
 
 @dataclass(frozen=True)
 class Swap:
-    """One claim, the player it costs, and what the pair is worth."""
+    """One claim, the player it costs, and what the pair is worth.
+
+    `gain` is the weighted points the pair adds over the whole horizon. `week_gain` is this
+    week's part of it, which can be negative when a claim pays off later.
+    """
 
     add: Player
     drop: Player | None
@@ -94,6 +189,7 @@ class Swap:
     model_points: float = 0.0
     market_points: float | None = None
     optimistic_gain: float = 0.0
+    week_gain: float = 0.0
 
     @property
     def disputed(self) -> bool:
@@ -122,34 +218,102 @@ def projected_total(lineup: Lineup) -> float:
     It is not safe when the defense is the player being dropped, and that is not a
     hypothetical: pricing swaps against a real roster, this function rated dropping the only
     team defense as free for all 116 candidates, because their projected zero was lost and the emptied
-    DEF slot cost nothing either. `fills_every_slot` exists to reject exactly that, and this
-    total must not be compared across lineups that differ in which slots are filled.
+    DEF slot cost nothing either. `best_swap` rejects exactly that by comparing empty slots
+    week by week, and this total must not be compared across lineups that differ in them.
     """
     return sum(choice.starter.projected_points for choice in lineup.choices)
 
 
-def fills_every_slot(lineup: Lineup, baseline_unfilled: int) -> bool:
-    """Whether a lineup leaves no slot emptier than the roster already did.
-
-    Yahoo permits an empty slot and scores it zero, so nothing stops a manager fielding one.
-    That makes it a trap for a points comparison rather than an impossibility: an unfilled
-    slot is invisible to `projected_total`, so dropping the only player at a position reads
-    as costless. Requiring a swap to fill what the baseline filled closes that hole without
-    needing a projection for a position that has none.
-    """
-    return len(lineup.unfilled) <= baseline_unfilled
-
-
-def solve(context: Context, roster: list[Player]) -> Lineup:
+def solve(context: Context, roster: list[Player], week: int | None = None) -> Lineup:
+    target = context.week if week is None else week
     return recommend_lineup(
         roster,
         context.usage,
-        context.projections,
-        context.byes,
-        context.week,
+        context.projections_for(target),
+        context.byes_in(target),
+        target,
         context.league,
         through_week=context.through_week,
     )
+
+
+def status_in(context: Context, player: Player, week: int) -> str:
+    """The designation that still applies in `week`.
+
+    This week's report applies in full. A long-term status holds for LONG_TERM_WEEKS, and
+    anything shorter is assumed cleared by the following week.
+    """
+    status = (player.injury_status or "").upper()
+    if week == context.week:
+        return status
+    if status in LONG_TERM_STATUSES and week < context.week + LONG_TERM_WEEKS:
+        return status
+    return ""
+
+
+def _as_of(context: Context, roster: list[Player], week: int) -> list[Player]:
+    if week == context.week:
+        return roster
+    return [
+        player
+        if status_in(context, player, week) == (player.injury_status or "").upper()
+        else replace(player, injury_status=status_in(context, player, week))
+        for player in roster
+    ]
+
+
+def _week_state(context: Context, roster: list[Player], week: int) -> frozenset[str]:
+    """Who cannot play in `week`. Two later weeks with the same answer score the same."""
+    byes = {team.upper() for team in context.byes_in(week)}
+    return frozenset(
+        player.marker
+        for player in roster
+        if (player.team and player.team.upper() in byes)
+        or status_in(context, player, week) in UNAVAILABLE_STATUSES
+    )
+
+
+def _week_value(context: Context, roster: list[Player], week: int) -> tuple[float, int]:
+    """Expected points from the best lineup in `week`, and how many slots it leaves empty.
+
+    A starter listed questionable or doubtful this week is weighed by his odds of playing:
+    the lineup loses, in proportion, what replacing him from the bench would cost. Each
+    one is treated on his own, which is close enough for the two or three a roster carries.
+    """
+    players = _as_of(context, roster, week)
+    lineup = solve(context, players, week)
+    full = projected_total(lineup)
+    expected = full
+    if week == context.week:
+        for choice in lineup.choices:
+            starter = choice.starter.player
+            odds = PLAY_ODDS.get((starter.injury_status or "").upper())
+            if odds is None:
+                continue
+            without = projected_total(solve(context, [p for p in players if p is not starter], week))
+            expected -= (1.0 - odds) * max(0.0, full - without)
+    return expected, len(lineup.unfilled)
+
+
+def season_value(context: Context, roster: list[Player]) -> SeasonValue:
+    """The roster's weighted points over the horizon."""
+    seen: dict[tuple[frozenset[str], int], tuple[float, int]] = {}
+    value = this_week = 0.0
+    unfilled: list[int] = []
+    for week in context.weeks:
+        if week == context.week:
+            points, empty = _week_value(context, roster, week)
+            this_week = points
+        else:
+            # Without a long-run role every later week projects alike, so weeks with the same
+            # absences can share one solve.
+            key = (_week_state(context, roster, week), week if context.long_run else 0)
+            if key not in seen:
+                seen[key] = _week_value(context, roster, week)
+            points, empty = seen[key]
+        value += context.weight(week) * points
+        unfilled.append(empty)
+    return SeasonValue(value=value, this_week=this_week, unfilled=tuple(unfilled))
 
 
 def baseline_lineup(context: Context) -> Lineup:
@@ -157,9 +321,24 @@ def baseline_lineup(context: Context) -> Lineup:
     return solve(context, context.roster)
 
 
-def baseline(context: Context) -> float:
-    """The best total available from the roster as it stands."""
-    return projected_total(baseline_lineup(context))
+def baseline(context: Context) -> SeasonValue:
+    """The roster's value as it stands, over the horizon."""
+    return season_value(context, context.roster)
+
+
+def open_positions(context: Context, positions: tuple[str, ...]) -> set[str]:
+    """Positions this week's lineup has a hole at: an empty slot, or a starter who may sit."""
+    lineup = baseline_lineup(context)
+    needed = {
+        position
+        for slot in lineup.unfilled
+        for position in positions
+        if context.league.accepts(slot, position)
+    }
+    for choice in lineup.choices:
+        if (choice.starter.player.injury_status or "").upper() in PLAY_ODDS:
+            needed.add(choice.starter.player.position)
+    return needed & set(positions)
 
 
 def player_points(context: Context, player: Player) -> float:
@@ -199,19 +378,73 @@ def valued_at(context: Context, player: Player, points: float) -> Context:
     """A copy of `context` in which one player is projected at `points`.
 
     Used to re-price a single candidate without disturbing anyone else, so the same solver
-    answers the same question against two different opinions of one player.
+    answers the same question against two different opinions of one player. His long-run
+    role is scaled by the same ratio, so a lower opinion holds in later weeks too rather
+    than drifting back to the higher one.
     """
     existing = context.projections.get(player.gsis_id) if player.gsis_id else None
-    if existing is None:
+    if existing is None or points == existing.points:
         return context
+    long_run = context.long_run
+    settled = long_run.get(player.gsis_id)
+    if settled is not None:
+        ratio = points / existing.points if existing.points > 0 else 0.0
+        long_run = {**long_run, player.gsis_id: replace(settled, points=settled.points * ratio)}
     return replace(
         context,
         projections={**context.projections, player.gsis_id: replace(existing, points=points)},
+        long_run=long_run,
     )
 
 
-def best_swap(context: Context, candidate: Player, base: float | None = None) -> Swap:
-    """The most valuable way to fit `candidate` onto the roster.
+def _losses(context: Context, start: SeasonValue) -> list[tuple[float, Player]]:
+    """What dropping each unprotected player costs the roster, cheapest first.
+
+    Computed once per context, because it does not depend on who is being added.
+    A keeper is left out, since he carries next season's value no weekly gain can outbid.
+    """
+    if "losses" not in context._cache:
+        rows = [
+            (
+                max(0.0, start.value - season_value(context, [p for p in context.roster if p is not held]).value),
+                held,
+            )
+            for held in context.roster
+            if held.marker not in context.protected
+        ]
+        rows.sort(key=lambda row: row[0])
+        context._cache["losses"] = rows
+    return context._cache["losses"]
+
+
+def _ceiling(context: Context, candidate: Player) -> float:
+    """The most adding `candidate` could ever be worth: starting him every week he plays.
+
+    A lineup that gains him loses at most his points once he is removed again, so this
+    bounds the gain. This week it is scaled by the starters who may sit, because he can
+    stand in for each of them.
+    """
+    stand_ins = sum(
+        1.0 - PLAY_ODDS[status]
+        for player in context.roster
+        if (status := (player.injury_status or "").upper()) in PLAY_ODDS
+    )
+    byes_cache: dict[int, set[str]] = {}
+    total = 0.0
+    for week in context.weeks:
+        byes = byes_cache.setdefault(week, {team.upper() for team in context.byes_in(week)})
+        if (candidate.team and candidate.team.upper() in byes) or status_in(
+            context, candidate, week
+        ) in UNAVAILABLE_STATUSES:
+            continue
+        projection = context.projections_for(week).get(candidate.gsis_id or "")
+        points = projection.points if projection else 0.0
+        total += context.weight(week) * points * (max(1.0, stand_ins) if week == context.week else 1.0)
+    return total
+
+
+def best_swap(context: Context, candidate: Player, base: SeasonValue | None = None) -> Swap:
+    """The most valuable way to fit `candidate` onto the roster, over the whole horizon.
 
     Searched against the CONSERVATIVE valuation, meaning the lower of this project's own
     projection and Yahoo's, because that is the number a bid is safe to rest on. The gain
@@ -220,31 +453,30 @@ def best_swap(context: Context, candidate: Player, base: float | None = None) ->
 
     Tries every possible drop and keeps the best. Gain is never negative, because declining
     the claim is always available: a swap that would lose points is reported as worth zero
-    rather than recommended.
+    rather than recommended. A drop that leaves any week with a slot the roster could have
+    filled is refused, since an empty slot reads as free to a points total.
 
     Ties break toward dropping the lowest-projected player, so the report names the drop a
     reader would expect when two choices are worth the same.
     """
-    start = baseline_lineup(context)
-    if base is None:
-        base = projected_total(start)
-    baseline_unfilled = len(start.unfilled)
-    held_starters = {
-        choice.starter.player.gsis_id
-        for choice in start.choices
-        if choice.starter.player.gsis_id
-    }
+    start = base if base is not None else baseline(context)
+    held_starters = starter_ids(context, context.roster)
 
     model = player_points(context, candidate)
     market = market_points(context, candidate)
     priced = conservative_points(model, market)
     pricing = valued_at(context, candidate, priced)
 
-    def gain_for(ctx: Context, roster: list[Player]) -> tuple[float, bool]:
-        lineup = solve(ctx, roster)
-        return max(0.0, projected_total(lineup) - base), fills_every_slot(
-            lineup, baseline_unfilled
-        )
+    def evaluate(ctx: Context, roster: list[Player]) -> tuple[SeasonValue, bool]:
+        season = season_value(ctx, roster)
+        legal = all(after <= before for after, before in zip(season.unfilled, start.unfilled))
+        return season, legal
+
+    def optimistic_for(roster: list[Player], conservative: float) -> float:
+        if market is None or priced == model:
+            return conservative
+        season, _ = evaluate(context, roster)
+        return max(0.0, season.value - start.value)
 
     common = dict(
         add=candidate,
@@ -254,31 +486,32 @@ def best_swap(context: Context, candidate: Player, base: float | None = None) ->
     )
 
     if not context.is_full:
-        gain, _ = gain_for(pricing, [*context.roster, candidate])
-        optimistic, _ = gain_for(context, [*context.roster, candidate])
+        roster = [*context.roster, candidate]
+        season, _ = evaluate(pricing, roster)
+        gain = max(0.0, season.value - start.value)
         return Swap(
             drop=None,
             gain=gain,
             drop_points=0.0,
             drop_was_starter=False,
-            optimistic_gain=optimistic,
+            optimistic_gain=optimistic_for(roster, gain),
+            week_gain=season.this_week - start.this_week,
             **common,
         )
 
     best: Swap | None = None
-    for held in context.roster:
+    ceiling = _ceiling(pricing, candidate)
+    for loss, held in _losses(context, start):
         if held.gsis_id and held.gsis_id == candidate.gsis_id:
             continue
-        if held.marker in context.protected:
-            # A keeper carries next season's value, which no weekly gain can outbid.
-            continue
-        remaining = [p for p in context.roster if p is not held]
-        gain, legal = gain_for(pricing, [*remaining, candidate])
+        if best is not None and ceiling - loss < best.gain:
+            # Drops are in rising order of cost, so no later one can do better either.
+            break
+        roster = [*(p for p in context.roster if p is not held), candidate]
+        season, legal = evaluate(pricing, roster)
         if not legal:
-            # Dropping this player empties a slot nothing else can fill, which reads as
-            # free to a points comparison and is not.
             continue
-        optimistic, _ = gain_for(context, [*remaining, candidate])
+        gain = max(0.0, season.value - start.value)
         drop_points = player_points(context, held)
         swap = Swap(
             drop=held,
@@ -286,14 +519,16 @@ def best_swap(context: Context, candidate: Player, base: float | None = None) ->
             drop_points=drop_points,
             drop_was_starter=bool(held.gsis_id) and held.gsis_id in held_starters,
             drop_blocked=blocked_reason(context, held),
-            optimistic_gain=optimistic,
+            week_gain=season.this_week - start.this_week,
             **common,
         )
         if best is None or (swap.gain, -swap.drop_points) > (best.gain, -best.drop_points):
             best = swap
 
     if best is not None:
-        return best
+        assert best.drop is not None
+        roster = [*(p for p in context.roster if p is not best.drop), candidate]
+        return replace(best, optimistic_gain=optimistic_for(roster, best.gain))
     return Swap(
         drop=None,
         gain=0.0,
@@ -308,8 +543,8 @@ def best_per_position(swaps: list[Swap], limit: int = 2) -> list[Swap]:
     """Keep only the strongest claims at each position, preserving rank order.
 
     Twenty kickers who all beat the same weak starter are one finding, not twenty claims, and
-    listing each of them buries every other position. `exclusive_gain` already prices them at
-    a dollar; this stops them filling the page as well.
+    listing each of them buries every other position. Their bids are already a dollar against
+    each other; this stops them filling the page as well.
     """
     kept: list[Swap] = []
     seen: dict[str, int] = {}

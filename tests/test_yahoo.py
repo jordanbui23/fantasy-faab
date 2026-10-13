@@ -295,7 +295,7 @@ def test_an_empty_team_roster_raises_rather_than_reporting_all_clear():
 def _transaction(meta, moves):
     players = collection(
         "player",
-        [[[{"player_key": f"p.{i}"}, {"name": {"full": name}}], {"transaction_data": data}] for i, (name, data) in enumerate(moves)],
+        [[[{"player_key": f"p.{i}"}, {"name": {"full": name}}, {"display_position": "WR,TE"}], {"transaction_data": data}] for i, (name, data) in enumerate(moves)],
     )
     return [meta, {"players": players}]
 
@@ -315,7 +315,7 @@ def test_completed_bids_read_adds_in_either_shape():
     )
     content = {"league": [{"league_key": "L"}, {"transactions": transactions}]}
     bids = yahoo.completed_bids(StubClient({"/transactions": content}), "L")
-    assert [(b.team_key, b.player_name, b.amount) for b in bids] == [("T1", "Dee One", 12), ("T2", "Eve Two", 0)]
+    assert [(b.team_key, b.player_name, b.amount, b.position) for b in bids] == [("T1", "Dee One", 12, "WR"), ("T2", "Eve Two", 0, "WR")]
 
 
 # --- the client ---------------------------------------------------------------------
